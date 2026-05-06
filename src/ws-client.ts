@@ -101,13 +101,27 @@ export class ChannelClient {
     this.ws.on('error', (err) => this.onError(err));
   }
 
-  /** Stop the client; do not reconnect. */
-  stop(): void {
+  /** Stop the client; do not reconnect. Resolves when the close
+   *  frame has actually flushed (or after a short hard cap), so a
+   *  process-exit immediately afterwards doesn't sever the TCP
+   *  connection before the FIN has gone out. The hub's on('close')
+   *  handler is what flips liveChannels[id] to gone — without
+   *  awaiting, the hub waits on TCP-level timeout instead. */
+  stop(): Promise<void> {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.close(1000, 'stop');
-    }
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const done = () => { if (!settled) { settled = true; resolve(); } };
+      ws.once('close', done);
+      try { ws.close(1000, 'stop'); } catch { done(); return; }
+      // Hard cap: don't block shutdown more than 1.5s if the close
+      // frame doesn't get acked. The hub will fall back to its pong-
+      // timeout heartbeat in that case (~60s).
+      setTimeout(done, 1500);
+    });
   }
 
   /** Send a message to hub. Drops the message if the WS isn't open. */

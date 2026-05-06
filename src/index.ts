@@ -238,17 +238,36 @@ async function main() {
   await server.connect(transport);
   log.info('mcp transport connected');
 
-  // Clean shutdown on common signals so the WS goes away cleanly +
-  // sidecar gets removed so a stale file doesn't mislead future hooks.
-  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-    process.on(sig, () => {
-      log.info('shutting down', { signal: sig });
-      client.stop();
-      deleteSidecar(cwd);
-      transport.close().catch(() => {});
-      setTimeout(() => process.exit(0), 200);
-    });
+  // Clean shutdown — fired by any of:
+  //   * SIGINT / SIGTERM             (POSIX, also emulated on Windows
+  //                                    when CC sends a graceful kill)
+  //   * stdin close ('end' / 'close') (CC's typical exit path on Windows
+  //                                    where SIGTERM is unreliable —
+  //                                    parent just closes our stdio)
+  //
+  // The big difference vs the prior implementation: we await the WS
+  // close-frame flush before exiting. Without that wait, exit() ran
+  // before the FIN reached the hub, so the hub had to fall back to
+  // TCP-level timeout to notice — sessions stayed "online" minutes
+  // after a clean CC exit. ChannelClient.stop() now returns a
+  // Promise that resolves on close-frame ack (or 1.5s hard cap).
+  let shuttingDown = false;
+  async function shutdown(reason: string) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log.info('shutting down', { reason });
+    try { await client.stop(); } catch { /* ignore */ }
+    deleteSidecar(cwd);
+    try { await transport.close(); } catch { /* ignore */ }
+    process.exit(0);
   }
+  process.on('SIGINT',  () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  // CC closes our stdin pipe on graceful exit. Both events fire
+  // depending on platform / how the parent unhooks; listen for
+  // either so we don't miss it.
+  process.stdin.on('end',   () => void shutdown('stdin-end'));
+  process.stdin.on('close', () => void shutdown('stdin-close'));
   // Last-ditch sidecar cleanup. Even on uncaught exceptions, we'd
   // rather not leave a stale file pointing at a dead WS.
   process.on('exit', () => deleteSidecar(cwd));
