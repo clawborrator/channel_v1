@@ -15,14 +15,35 @@
 import { findSidecar, type SidecarPayload } from './sidecar.js';
 import { log } from './log.js';
 
+// Mirrors the install-hooks set from the old clawborrator-channel
+// package so the remote viewer has the same coverage of Claude Code's
+// hook surface. Mapping notes:
+//
+//   UserPromptSubmit  → chat/prompt   — the operator typed at Claude
+//   PreToolUse        → tail/PreToolUse
+//   PostToolUse       → tail/PostToolUse        (tool returned, possibly with an in-output error)
+//   PostToolUseFailure→ tail/PostToolUseFailure (tool machinery itself errored — distinct signal)
+//   Stop              → tail/Stop               — turn boundary
+//   Notification      → tail/Notification       — Claude wants the operator's attention (incl. permissions)
+//   SessionStart      → tail/SessionStart       — claude boot
+//   SessionEnd        → tail/SessionEnd         — claude shutdown
+//   TaskCreated       → tail/TaskCreated        — Task tool dispatched a subagent
+//   SubagentStart     → tail/SubagentStart      — subagent loop began
+//   SubagentStop      → tail/SubagentStop       — subagent loop ended
+//   TaskCompleted     → tail/TaskCompleted      — Task tool dispatch resolved
 const HOOK_TO_EVENT: Record<string, { kind: 'chat' | 'tail'; type: string }> = {
-  UserPromptSubmit: { kind: 'chat', type: 'prompt' },
-  PreToolUse:       { kind: 'tail', type: 'PreToolUse' },
-  PostToolUse:      { kind: 'tail', type: 'PostToolUse' },
-  Stop:             { kind: 'tail', type: 'Stop' },
-  Notification:     { kind: 'tail', type: 'Notification' },
-  SessionStart:     { kind: 'tail', type: 'SessionStart' },
-  SessionEnd:       { kind: 'tail', type: 'SessionEnd' },
+  UserPromptSubmit:    { kind: 'chat', type: 'prompt' },
+  PreToolUse:          { kind: 'tail', type: 'PreToolUse' },
+  PostToolUse:         { kind: 'tail', type: 'PostToolUse' },
+  PostToolUseFailure:  { kind: 'tail', type: 'PostToolUseFailure' },
+  Stop:                { kind: 'tail', type: 'Stop' },
+  Notification:        { kind: 'tail', type: 'Notification' },
+  SessionStart:        { kind: 'tail', type: 'SessionStart' },
+  SessionEnd:          { kind: 'tail', type: 'SessionEnd' },
+  TaskCreated:         { kind: 'tail', type: 'TaskCreated' },
+  SubagentStart:       { kind: 'tail', type: 'SubagentStart' },
+  SubagentStop:        { kind: 'tail', type: 'SubagentStop' },
+  TaskCompleted:       { kind: 'tail', type: 'TaskCompleted' },
 };
 
 async function readStdin(): Promise<string> {
