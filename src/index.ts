@@ -73,6 +73,14 @@ async function main() {
         writtenAt:    new Date().toISOString(),
       });
     },
+    onPrompt: (m) => {
+      // Phase 4 — operator routed a prompt at this session. Real
+      // injection into Claude Code (so Claude actually sees the
+      // prompt) requires Phase D MCP tool wiring; for now we log
+      // at info level so operators running clawborrator-mcp directly
+      // can see routes land.
+      log.info('prompt received', { chatId: m.chatId, text: m.text });
+    },
     onPermissionResponse: (m) => {
       // Phase C: the operator (or auto-expire) resolved a permission.
       // We surface it in the log so operators running with
