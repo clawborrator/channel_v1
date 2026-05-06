@@ -21,6 +21,7 @@ import { log } from './log.js';
 import { runHook } from './hook.js';
 import { writeSidecar, deleteSidecar } from './sidecar.js';
 import { TOOL_DEFINITIONS, callTool } from './tools/index.js';
+import { enqueueRoutedPrompt } from './inbox.js';
 
 // Dispatch on --hook=<HookName> first; that's the short-lived spawn
 // path Claude Code's hook system uses. Without it, fall through to
@@ -75,12 +76,10 @@ async function main() {
       });
     },
     onPrompt: (m) => {
-      // Phase 4 — operator routed a prompt at this session. Real
-      // injection into Claude Code (so Claude actually sees the
-      // prompt) requires Phase D MCP tool wiring; for now we log
-      // at info level so operators running clawborrator-mcp directly
-      // can see routes land.
+      // A peer session routed a prompt to us. Push to the inbox so
+      // the next `await_routed_prompt` tool call can pick it up.
       log.info('prompt received', { chatId: m.chatId, text: m.text });
+      enqueueRoutedPrompt({ chatId: m.chatId, text: m.text });
     },
     onPermissionResponse: (m) => {
       // Phase C: the operator (or auto-expire) resolved a permission.

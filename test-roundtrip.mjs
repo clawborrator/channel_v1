@@ -94,22 +94,33 @@ send(responder, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
 let askerBuf = '';
 let responderBuf = '';
 asker.stdout.on('data', (d) => { askerBuf += d.toString(); });
-responder.stderr.on('data', (d) => {
-  const text = d.toString();
-  process.stderr.write('[responder.stderr] ' + text);
-  // When we see a routed prompt arrive, send a `reply` tool call back
-  const m = /prompt received.*chatId":"([^"]+)"/.exec(text);
-  if (m) {
-    const chatId = m[1];
-    process.stderr.write(`[test] responder sees chatId=${chatId}; replying...\n`);
-    send(responder, { jsonrpc: '2.0', id: 99, method: 'tools/call', params: {
-      name: 'reply',
-      arguments: { chat_id: chatId, text: 'hello back from responder' },
-    }});
+asker.stderr.on('data', (d) => process.stderr.write('[asker.stderr] ' + d.toString()));
+responder.stderr.on('data', (d) => process.stderr.write('[responder.stderr] ' + d.toString()));
+
+// Watch the responder's stdout for the await_routed_prompt result.
+// When chatId is non-null, fire `reply` to close the round-trip.
+responder.stdout.on('data', (d) => {
+  responderBuf += d.toString();
+  let i;
+  while ((i = responderBuf.indexOf('\n')) >= 0) {
+    const line = responderBuf.slice(0, i);
+    responderBuf = responderBuf.slice(i + 1);
+    if (!line.trim()) continue;
+    let parsed;
+    try { parsed = JSON.parse(line); } catch { continue; }
+    if (parsed?.id === 50 && parsed.result?.content?.[0]?.text) {
+      let inner;
+      try { inner = JSON.parse(parsed.result.content[0].text); } catch { continue; }
+      if (inner?.chatId) {
+        process.stderr.write(`[test] responder dequeued chatId=${inner.chatId}; calling reply...\n`);
+        send(responder, { jsonrpc: '2.0', id: 51, method: 'tools/call', params: {
+          name: 'reply',
+          arguments: { chat_id: inner.chatId, text: 'hello back from responder' },
+        }});
+      }
+    }
   }
 });
-asker.stderr.on('data', (d) => process.stderr.write('[asker.stderr] ' + d.toString()));
-responder.stdout.on('data', (d) => { responderBuf += d.toString(); });
 
 // Give them a moment to register
 await new Promise((r) => setTimeout(r, 2000));
@@ -117,6 +128,14 @@ await new Promise((r) => setTimeout(r, 2000));
 // Send `initialized` notifications (handshake complete)
 send(asker, { jsonrpc: '2.0', method: 'notifications/initialized' });
 send(responder, { jsonrpc: '2.0', method: 'notifications/initialized' });
+
+// Responder parks an await_routed_prompt with a long wait so it
+// can dequeue whatever the asker routes.
+process.stderr.write('\n=== responder calls await_routed_prompt (10s wait) ===\n');
+send(responder, { jsonrpc: '2.0', id: 50, method: 'tools/call', params: {
+  name: 'await_routed_prompt',
+  arguments: { maxWaitMs: 10000 },
+}});
 
 // list_peers from asker
 process.stderr.write('\n=== asker calls list_peers ===\n');
