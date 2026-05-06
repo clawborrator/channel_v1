@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import { loadConfig } from './config.js';
 import { ChannelClient } from './ws-client.js';
 import { log } from './log.js';
@@ -233,6 +234,39 @@ async function main() {
     return await callTool({ client, sessionId: toolCtxSessionId }, req.params.name, args);
   });
   void toolCtxSessionId;
+
+  // CC-side permission relay. When CC needs the local user's
+  // permission to call a tool (built-in or MCP) and the
+  // claude/channel/permission experimental capability is on, CC
+  // sends `notifications/claude/channel/permission_request` to
+  // each registered MCP server. Handler forwards it over the
+  // channel WS so attached operators see it as a permission_request
+  // event they can /y or /n. The verdict comes back via the
+  // already-wired onPermissionResponse → notifications/claude/
+  // channel/permission path.
+  const PermissionRequestSchema = z.object({
+    method: z.literal('notifications/claude/channel/permission_request'),
+    params: z.object({
+      request_id:    z.string(),
+      tool_name:     z.string(),
+      description:   z.string().optional().default(''),
+      input_preview: z.string().optional().default(''),
+    }),
+  });
+  // setNotificationHandler's signature doesn't infer cleanly when the
+  // schema literal is built inline (TS2589 "Type instantiation is
+  // excessively deep"). Cast to bypass — runtime behavior is correct,
+  // we just lose the parameter type-narrowing on the handler arg.
+  (server as any).setNotificationHandler(PermissionRequestSchema, async ({ params }: { params: z.infer<typeof PermissionRequestSchema>['params'] }) => {
+    log.info('permission_request from CC', { requestId: params.request_id, tool: params.tool_name });
+    client.send({
+      type:         'permission_request',
+      requestId:    params.request_id,
+      tool:         params.tool_name,
+      inputPreview: params.input_preview || params.description || '',
+      ts:           new Date().toISOString(),
+    });
+  });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
