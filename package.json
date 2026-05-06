@@ -1,18 +1,45 @@
 {
   "name": "clawborrator-mcp",
   "version": "0.0.1",
-  "private": true,
   "type": "module",
-  "description": "clawborrator channel — MCP server that connects Claude Code to a hub_v1",
+  "description": "clawborrator channel for hub_v1 — MCP server that connects Claude Code to a hub over WebSocket, with hooks for activity capture and tools for cross-session routing.",
+  "license": "MIT",
+  "homepage": "https://github.com/clawborrator/channel_v1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clawborrator/channel_v1.git"
+  },
+  "bugs": {
+    "url": "https://github.com/clawborrator/channel_v1/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "mcp",
+    "clawborrator",
+    "websocket",
+    "remote",
+    "ai",
+    "agent",
+    "hub-v1"
+  ],
   "main": "dist/index.js",
   "bin": {
     "clawborrator-mcp": "bin/clawborrator-mcp"
   },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "build":     "tsc -p tsconfig.json",
-    "dev":       "tsx watch src/index.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "start":     "node dist/index.js"
+    "build":          "tsc -p tsconfig.json",
+    "dev":            "tsx watch src/index.ts",
+    "typecheck":      "tsc -p tsconfig.json --noEmit",
+    "start":          "node dist/index.js",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
