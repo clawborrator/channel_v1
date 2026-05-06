@@ -26,6 +26,8 @@ import { writeSidecar, deleteSidecar } from './sidecar.js';
 import { TOOL_DEFINITIONS, callTool } from './tools/index.js';
 import { enqueueRoutedPrompt } from './inbox.js';
 import { installHooks } from './install-hooks.js';
+import { loadPersistedSessionId, savePersistedSession } from './persisted-session.js';
+import { packageVersion } from './version.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -99,6 +101,20 @@ async function main() {
     log.warn('install-hooks failed', { error: e?.message ?? String(e) });
   }
 
+  // Layer the session-id source: explicit env var > on-disk persisted
+  // file > null (fresh). Persisting across restarts is what stops a
+  // cold `claude` boot in the same project from minting a duplicate
+  // session row with a sibling UUID under the same routing name.
+  if (!config.reuseSessionId) {
+    const persisted = loadPersistedSessionId(cwd);
+    if (persisted) {
+      log.info('reusing persisted session id', { sessionId: persisted });
+      config = { ...config, reuseSessionId: persisted };
+    }
+  } else {
+    log.info('reusing session id from env override', { sessionId: config.reuseSessionId });
+  }
+
   // Open the channel-side WS to hub.
   const client = new ChannelClient(config, {
     onWelcome: (m) => {
@@ -106,6 +122,15 @@ async function main() {
         sessionId:    m.sessionId,
         routingName:  m.routingName,
         channelToken: m.channelTokenName,
+      });
+      // Persist the hub-issued session id so the NEXT cold boot of
+      // this MCP rebinds the same row instead of minting a sibling
+      // (same routing name, different UUID — class of bug we hit
+      // before this was wired up).
+      savePersistedSession(cwd, {
+        sessionId:   m.sessionId,
+        routingName: m.routingName,
+        hubUrl:      config.hubUrl,
       });
       // Sidecar — Phase B hooks read this. The hub URL on the sidecar
       // is the HTTP form (hooks POST over HTTPS, not WS).
@@ -149,7 +174,7 @@ async function main() {
   const server = new Server(
     {
       name:    'clawborrator',
-      version: '0.0.1',
+      version: packageVersion(),
     },
     {
       capabilities: {

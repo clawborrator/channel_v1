@@ -14,6 +14,7 @@
 import WebSocket from 'ws';
 import { hostname, userInfo } from 'node:os';
 import { log } from './log.js';
+import { packageVersion } from './version.js';
 import type { ChannelConfig } from './config.js';
 
 // Outbound shapes match shared/src/ws-protocol.ts. We don't import
@@ -43,7 +44,6 @@ type Inbound =
   | { type: 'error'; code: string; message: string };
 
 const BACKOFF_SCHEDULE = [1_000, 2_000, 5_000, 15_000, 30_000, 60_000];
-const PACKAGE_VERSION = '0.0.1';
 
 export interface ChannelClientHandlers {
   onWelcome?:  (msg: Extract<Inbound, { type: 'welcome' }>) => void;
@@ -156,7 +156,7 @@ export class ChannelClient {
       cwd: process.cwd(),
       osUser: userInfo().username || null,
       pid: process.pid,
-      channelVersion: PACKAGE_VERSION,
+      channelVersion: packageVersion(),
       sessionId: this.currentSessionId,  // null on fresh, populated on rebind
     };
     this.send(reg);
