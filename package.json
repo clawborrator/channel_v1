@@ -1,0 +1,27 @@
+{
+  "name": "clawborrator-mcp",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "clawborrator channel — MCP server that connects Claude Code to a hub_v1",
+  "main": "dist/index.js",
+  "bin": {
+    "clawborrator-mcp": "bin/clawborrator-mcp"
+  },
+  "scripts": {
+    "build":     "tsc -p tsconfig.json",
+    "dev":       "tsx watch src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start":     "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}
