@@ -25,12 +25,18 @@ type Outbound =
   | { type: 'chat_event'; eventType: 'prompt' | 'reply'; payload: Record<string, unknown>; ts: string }
   | { type: 'tail_event'; eventType: 'PreToolUse' | 'PostToolUse' | 'Stop' | 'Notification' | 'UserPromptSubmit'; payload: Record<string, unknown>; ts: string }
   | { type: 'permission_request'; requestId: string; tool: string; inputPreview: string; ts: string }
+  | { type: 'route_request'; correlationId: string; peer: string; prompt: string; mode: 'ask' | 'tell' }
+  | { type: 'probe_request'; correlationId: string; peers: string[] | null; prompt: string }
+  | { type: 'list_peers_request'; correlationId: string }
   | { type: 'pong'; ts: string };
 
 type Inbound =
   | { type: 'welcome'; sessionId: string; routingName: string; channelTokenName: string }
   | { type: 'prompt'; chatId: string; text: string }
   | { type: 'permission_response'; requestId: string; decision: 'allow' | 'deny' | 'expired'; message: string | null }
+  | { type: 'route_response'; correlationId: string; peerLogin: string; reply: string }
+  | { type: 'probe_response'; correlationId: string; peerLogin: string | null; answer: string | null; done?: boolean }
+  | { type: 'list_peers_response'; correlationId: string; peers: { login: string; name: string; online: boolean }[] }
   | { type: 'peers_update'; peers: { login: string; name: string; online: boolean }[] }
   | { type: 'bye'; reason: string; retry: boolean }
   | { type: 'ping'; ts: string }
@@ -47,12 +53,31 @@ export interface ChannelClientHandlers {
   onError?:    (msg: Extract<Inbound, { type: 'error' }>) => void;
 }
 
+// Pending correlation entry for a send-and-await call. `kind` lets
+// the response handler dispatch correctly: 'single' resolves on the
+// first matching response; 'probe' accumulates probe_response events
+// until done:true (or timeout).
+interface PendingSingle {
+  kind: 'single';
+  resolve: (result: any) => void;
+  reject:  (err: Error) => void;
+  timer:   NodeJS.Timeout;
+}
+interface PendingProbe {
+  kind: 'probe';
+  results: { peerLogin: string; answer: string | null }[];
+  resolve: (result: any) => void;
+  timer:   NodeJS.Timeout;
+}
+type Pending = PendingSingle | PendingProbe;
+
 export class ChannelClient {
   private ws: WebSocket | null = null;
   private attempt = 0;
   private stopped = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private currentSessionId: string | null;
+  private pending = new Map<string /* correlationId */, Pending>();
 
   constructor(
     private readonly config: ChannelConfig,
@@ -92,6 +117,34 @@ export class ChannelClient {
       return;
     }
     this.ws.send(JSON.stringify(msg));
+  }
+
+  /** Send a request and await its single matching response. Used by
+   *  list_peers and route_to_peer (ask mode). */
+  requestSingle<T>(msg: Outbound & { correlationId: string }, timeoutMs: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(msg.correlationId);
+        reject(new Error(`request timed out (correlationId=${msg.correlationId})`));
+      }, timeoutMs);
+      this.pending.set(msg.correlationId, { kind: 'single', resolve, reject, timer });
+      this.send(msg);
+    });
+  }
+
+  /** Send a probe_request and accumulate per-peer probe_response
+   *  events until {done: true} or timeout. Resolves with whatever
+   *  was collected. */
+  requestProbe(msg: Outbound & { type: 'probe_request' }, timeoutMs: number): Promise<{ peerLogin: string; answer: string | null }[]> {
+    return new Promise((resolve) => {
+      const results: { peerLogin: string; answer: string | null }[] = [];
+      const timer = setTimeout(() => {
+        this.pending.delete(msg.correlationId);
+        resolve(results);
+      }, timeoutMs);
+      this.pending.set(msg.correlationId, { kind: 'probe', results, resolve, timer });
+      this.send(msg);
+    });
   }
 
   private onOpen(): void {
@@ -136,6 +189,36 @@ export class ChannelClient {
       case 'peers_update':
         this.handlers.onPeersUpdate?.(msg);
         break;
+      case 'list_peers_response': {
+        const p = this.pending.get(msg.correlationId);
+        if (p && p.kind === 'single') {
+          clearTimeout(p.timer);
+          this.pending.delete(msg.correlationId);
+          p.resolve(msg.peers);
+        }
+        break;
+      }
+      case 'route_response': {
+        const p = this.pending.get(msg.correlationId);
+        if (p && p.kind === 'single') {
+          clearTimeout(p.timer);
+          this.pending.delete(msg.correlationId);
+          p.resolve({ peerLogin: msg.peerLogin, reply: msg.reply });
+        }
+        break;
+      }
+      case 'probe_response': {
+        const p = this.pending.get(msg.correlationId);
+        if (!p || p.kind !== 'probe') break;
+        if (msg.done) {
+          clearTimeout(p.timer);
+          this.pending.delete(msg.correlationId);
+          p.resolve(p.results);
+        } else if (msg.peerLogin) {
+          p.results.push({ peerLogin: msg.peerLogin, answer: msg.answer });
+        }
+        break;
+      }
       case 'bye':
         log.info('bye from hub', { reason: msg.reason, retry: msg.retry });
         if (!msg.retry) this.stopped = true;

@@ -20,6 +20,7 @@ import { ChannelClient } from './ws-client.js';
 import { log } from './log.js';
 import { runHook } from './hook.js';
 import { writeSidecar, deleteSidecar } from './sidecar.js';
+import { TOOL_DEFINITIONS, callTool } from './tools/index.js';
 
 // Dispatch on --hook=<HookName> first; that's the short-lived spawn
 // path Claude Code's hook system uses. Without it, fall through to
@@ -100,9 +101,7 @@ async function main() {
   });
   client.connect();
 
-  // MCP stdio transport. Phase A registers an empty tool list so
-  // Claude Code's MCP handshake completes without errors. Tools land
-  // in Phase D.
+  // MCP stdio transport. Phase D ships the four routing tools.
   const server = new Server(
     {
       name:    'clawborrator',
@@ -115,19 +114,23 @@ async function main() {
     },
   );
 
+  // Track our session id so tools (and future use) can reference it.
+  // Set by the onWelcome handler above.
+  let toolCtxSessionId: string | null = null;
+
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [],   // Phase D: list_peers, route_to_peer, probe_peers, reply
+    tools: TOOL_DEFINITIONS.map((t) => ({
+      name:        t.name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    })),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    return {
-      isError: true,
-      content: [{
-        type: 'text',
-        text: `clawborrator-mcp Phase A: tool '${req.params.name}' not implemented yet`,
-      }],
-    };
+    const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+    return await callTool({ client, sessionId: toolCtxSessionId }, req.params.name, args);
   });
+  void toolCtxSessionId;
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
