@@ -12,6 +12,9 @@
 // background.
 
 import { hostname } from 'node:os';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -22,10 +25,14 @@ import { runHook } from './hook.js';
 import { writeSidecar, deleteSidecar } from './sidecar.js';
 import { TOOL_DEFINITIONS, callTool } from './tools/index.js';
 import { enqueueRoutedPrompt } from './inbox.js';
+import { installHooks } from './install-hooks.js';
 
-// Dispatch on --hook=<HookName> first; that's the short-lived spawn
-// path Claude Code's hook system uses. Without it, fall through to
-// the long-lived MCP stdio server.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Dispatch on top-level flags BEFORE booting the long-lived MCP.
+//   --hook=<HookName>     short-lived hook spawn (fast path)
+//   --print-hook-file     stream the bundled dist-hook/.mjs to stdout
+//   (none)                long-lived stdio MCP server
 const hookFlag = process.argv.find((a) => a.startsWith('--hook='));
 if (hookFlag) {
   const name = hookFlag.slice('--hook='.length);
@@ -33,6 +40,19 @@ if (hookFlag) {
     log.error('hook fatal', { error: String(err) });
     process.exit(0);   // never fail the operator's actual Claude flow
   });
+} else if (process.argv.includes('--print-hook-file')) {
+  // Used by `claw session init` to materialize a local copy of the
+  // bundled hook entry into the project's .claude/hooks/ folder.
+  // dist-hook/clawborrator-tail.mjs is built by esbuild at publish
+  // time and shipped in the package's `files` allow-list.
+  // Compiled __dirname is dist/, so the bundle is at ../dist-hook.
+  const candidate = resolve(__dirname, '..', 'dist-hook', 'clawborrator-tail.mjs');
+  if (!existsSync(candidate)) {
+    process.stderr.write(`[clawborrator-mcp] bundled hook file missing at ${candidate}\n`);
+    process.exit(2);
+  }
+  process.stdout.write(readFileSync(candidate, 'utf8'));
+  process.exit(0);
 } else {
   main().catch((err) => {
     log.error('fatal', { error: String(err), stack: err?.stack });
@@ -53,6 +73,31 @@ async function main() {
 
   const cwd = process.cwd();
   const host = hostname();
+
+  // Self-install / refresh project hooks in .claude/. Idempotent —
+  // touches files only when the desired state diverges from disk, so
+  // re-runs of `claude` cost nothing. Operators no longer need to
+  // run a separate `init` command — dropping a .mcp.json with a
+  // valid channel token is the only setup step.
+  try {
+    const r = installHooks(cwd);
+    if (r.hookFileWritten || r.settingsWritten) {
+      log.info('hooks installed', {
+        hookFile:        r.hookFileWritten,
+        settings:        r.settingsWritten,
+        added:           r.added,
+        refreshed:       r.refreshed,
+        alreadyOk:       r.alreadyOk,
+        path:            r.hookFilePath,
+      });
+    } else {
+      log.debug('hooks already up-to-date', { added: r.added, refreshed: r.refreshed, alreadyOk: r.alreadyOk });
+    }
+  } catch (e: any) {
+    // Don't fail boot — operator can still drive Claude; just log so
+    // they see hooks aren't capturing.
+    log.warn('install-hooks failed', { error: e?.message ?? String(e) });
+  }
 
   // Open the channel-side WS to hub.
   const client = new ChannelClient(config, {

@@ -1,6 +1,6 @@
 {
   "name": "clawborrator-mcp",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "type": "module",
   "description": "clawborrator channel for hub_v1 — MCP server that connects Claude Code to a hub over WebSocket, with hooks for activity capture and tools for cross-session routing.",
   "license": "MIT",
@@ -28,6 +28,7 @@
   },
   "files": [
     "dist",
+    "dist-hook",
     "bin",
     "README.md"
   ],
@@ -35,10 +36,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "build":          "tsc -p tsconfig.json",
-    "dev":            "tsx watch src/index.ts",
-    "typecheck":      "tsc -p tsconfig.json --noEmit",
-    "start":          "node dist/index.js",
+    "build": "npm run build:tsc && npm run build:hook",
+    "build:tsc": "tsc -p tsconfig.json",
+    "build:hook": "esbuild src/hook-entry.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist-hook/clawborrator-tail.mjs --banner:js=\"#!/usr/bin/env node\"",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
@@ -48,6 +51,7 @@
   "devDependencies": {
     "@types/node": "^22.7.5",
     "@types/ws": "^8.5.13",
+    "esbuild": "^0.24.2",
     "tsx": "^4.19.1",
     "typescript": "^5.6.2"
   }
