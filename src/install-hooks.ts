@@ -51,10 +51,20 @@ function isOurHook(h: { type: 'command'; command: string }): boolean {
   return h.type === 'command' && h.command.includes(`#${TAG}`);
 }
 
-function hookCommand(name: string): string {
-  // Hooks run with cwd = project root. Quoting the path keeps Windows
-  // paths with spaces working.
-  return `node ".claude/hooks/clawborrator-tail.mjs" ${name} #${TAG}`;
+function hookCommand(name: string, hookFilePath: string): string {
+  // Use the absolute path of the installed hook file. CC resolves
+  // relative paths in hook commands against ITS OWN cwd — not against
+  // the directory that owns the settings.json. So a relative path
+  // like ".claude/hooks/clawborrator-tail.mjs" works only when CC is
+  // launched in the exact same dir where the MCP installed the
+  // hooks. The moment the user runs CC in a subdir or unrelated
+  // sibling (and CC walks up to find a parent .claude/settings.json),
+  // the relative path resolves wrong and the hook crashes with
+  // MODULE_NOT_FOUND. v0 used absolute paths for this reason.
+  // Forward slashes for cross-platform consistency (Windows accepts
+  // them in CLI invocations).
+  const absPath = hookFilePath.replace(/\\/g, '/');
+  return `node "${absPath}" ${name} #${TAG}`;
 }
 
 // Find the bundled dist-hook/clawborrator-tail.mjs that ships next
@@ -131,7 +141,7 @@ export function installHooks(cwd: string): {
       entry = { matcher: '.*', hooks: [] };
       arr.push(entry);
     }
-    const desiredCmd = hookCommand(name);
+    const desiredCmd = hookCommand(name, hookFile);
     const existingIdx = entry.hooks.findIndex(isOurHook);
     if (existingIdx >= 0) {
       if (entry.hooks[existingIdx].command !== desiredCmd) {

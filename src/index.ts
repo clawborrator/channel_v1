@@ -211,6 +211,28 @@ async function main() {
         params: { request_id: m.requestId, behavior },
       }).catch((e) => log.warn('permission notification failed', { error: String(e) }));
     },
+    onRouteReply: (m) => {
+      // A peer this session routed a prompt to (via either route_to_peer
+      // MCP tool OR via a TUI @-redirect anchored on this session) has
+      // replied. Forward to Claude as a channel notification with the
+      // [peer report] prefix so it's surfaced to context but Claude
+      // doesn't reflexively call `reply` on it. Same convention old
+      // channel/channel.js:736 uses.
+      log.info('route_reply received', { routeId: m.routeId, from: m.fromName });
+      const fromTag = m.fromName ? '@' + m.fromName.replace(/^@/, '') : 'peer';
+      const sender  = (m.fromName || 'peer').replace(/^@/, '').replace(/[^A-Za-z0-9_]/g, '_');
+      server.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content:
+            `[peer report from ${fromTag} via cross-session routing — informational, no reply required] ` +
+            `Use TaskUpdate / TaskGet to close out tracked work, or route_to_peer to follow up. ` +
+            `Don't call the reply tool on this chat_id.\n\n` +
+            String(m.text ?? ''),
+          meta: { chat_id: `peer_${m.routeId}`, sender },
+        },
+      }).catch((e) => log.warn('route_reply notification failed', { error: String(e) }));
+    },
     onError: (m) => {
       log.error('hub rejected', { code: m.code, message: m.message });
     },
