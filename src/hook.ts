@@ -240,11 +240,11 @@ export async function runHook(hookName: string): Promise<void> {
   }
 
   try {
-    if (hookName === 'Stop' || hookName === 'SubagentStop') {
+    if (hookName === 'Stop') {
+      // Real turn end — extract final answer + ship chat/reply so
+      // attached operators see Claude's response in the chat lane.
+      // The tail Stop event below marks the boundary.
       await enrichStopAssistantText(payload, hookName);
-      // After enrichment, also ship a chat/reply event with the final
-      // answer text so attached operators see Claude's reply in the
-      // chat lane (the tail Stop event below marks the boundary).
       const reply = typeof payload.assistant_text === 'string' ? payload.assistant_text.trim() : '';
       if (reply) {
         await postEvent(sidecar, {
@@ -255,6 +255,14 @@ export async function runHook(hookName: string): Promise<void> {
           ts:        new Date().toISOString(),
         }, 2000);
       }
+    } else if (hookName === 'SubagentStop') {
+      // A Task-tool subagent finished. NOT a final-answer event — the
+      // parent agent is still running and will fire its own Stop later.
+      // Some CC versions populate `last_assistant_message` with the
+      // subagent's INPUT prompt rather than its reply, which previously
+      // surfaced as a misleading chat/reply row. We still record the
+      // tail event below for activity-lane visibility, but skip the
+      // chat/reply ship entirely.
     } else if (hookName === 'PreToolUse') {
       await shipPreToolAssistantText(sidecar, payload);
     }
