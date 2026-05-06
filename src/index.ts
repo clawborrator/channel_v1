@@ -52,8 +52,7 @@ async function main() {
   const cwd = process.cwd();
   const host = hostname();
 
-  // Open the channel-side WS to hub. Phase A: just connect + register
-  // + heartbeat + reconnect. Phase B-D will add handlers.
+  // Open the channel-side WS to hub.
   const client = new ChannelClient(config, {
     onWelcome: (m) => {
       log.info('session ready', {
@@ -72,6 +71,19 @@ async function main() {
         host,
         cwd,
         writtenAt:    new Date().toISOString(),
+      });
+    },
+    onPermissionResponse: (m) => {
+      // Phase C: the operator (or auto-expire) resolved a permission.
+      // We surface it in the log so operators running with
+      // CLAWBORRATOR_LOG_LEVEL=info can see decisions land. Real
+      // hook integration (where this decision routes back to a
+      // pending hook spawn) is a follow-on once we wire IPC between
+      // the long-lived MCP and the short-lived hook process.
+      log.info('permission resolved', {
+        requestId: m.requestId,
+        decision:  m.decision,
+        message:   m.message ?? null,
       });
     },
     onError: (m) => {
