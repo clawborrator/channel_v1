@@ -24,10 +24,11 @@ import { log } from './log.js';
 import { runHook } from './hook.js';
 import { writeSidecar, deleteSidecar } from './sidecar.js';
 import { TOOL_DEFINITIONS, callTool } from './tools/index.js';
-import { enqueueRoutedPrompt } from './inbox.js';
 import { installHooks } from './install-hooks.js';
 import { loadPersistedSessionId, savePersistedSession } from './persisted-session.js';
 import { packageVersion } from './version.js';
+
+const SOURCE_NAME = 'clawborrator';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -115,6 +116,40 @@ async function main() {
     log.info('reusing session id from env override', { sessionId: config.reuseSessionId });
   }
 
+  // MCP stdio transport. Built BEFORE the ChannelClient so the WS
+  // handlers below can call server.notification() to push channel
+  // messages to Claude. We declare experimental capabilities matching
+  // the CC channel feature gate (CC's `--dangerously-load-development-
+  // channels server:clawborrator` flag opts into these); without
+  // them CC drops `notifications/claude/channel` on the floor.
+  const server = new Server(
+    {
+      name:    SOURCE_NAME,
+      version: packageVersion(),
+    },
+    {
+      capabilities: {
+        experimental: {
+          'claude/channel':            {},   // listen for notifications/claude/channel
+          'claude/channel/permission': {},   // listen for permission verdicts
+        },
+        tools: { listChanged: true },
+      },
+      instructions:
+        `Messages from a remote operator arrive as <channel source="${SOURCE_NAME}" chat_id="..."> tags. ` +
+        `Treat them as user input from someone working with you remotely. ` +
+        `When you reply, use the "reply" tool and pass back the chat_id from the inbound tag so the response routes correctly. ` +
+        `Permission prompts may also be relayed for remote approval; the local terminal dialog stays open in parallel. ` +
+        `\n\nCross-session routing tools (gated on the operator opting in):` +
+        `\n- list_peers: see the operator's other running Claude Code sessions by routingName.` +
+        `\n- route_to_peer: send one prompt to one peer; ask mode waits for their reply, tell mode is fire-and-forget.` +
+        `\n- probe_peers: fan out the same short question to many peers in parallel for discovery (e.g. "do you have a User model?").` +
+        `\nWhen any of these returns "cross-session routing is disabled", tell the operator to enable it in hub Settings; don't retry. ` +
+        `Use them when the operator asks something that genuinely lives in a different repo, when you need information another session has in its context, or when handing off a self-contained subtask makes more sense than doing it here.` +
+        `\n\nPeer reports: when you dispatched work to a peer with route_to_peer in tell mode, the peer's eventual reply arrives here as a normal channel notification tagged "[peer report from @<peer> via cross-session routing — informational, no reply required]". React by closing the matching task (TaskUpdate), surfacing a one-line status update to the operator, or routing a follow-up — but DO NOT call the reply tool on a peer-report chat_id; the operator already saw the report on their dashboard.`,
+    },
+  );
+
   // Open the channel-side WS to hub.
   const client = new ChannelClient(config, {
     onWelcome: (m) => {
@@ -146,42 +181,40 @@ async function main() {
       });
     },
     onPrompt: (m) => {
-      // A peer session routed a prompt to us. Push to the inbox so
-      // the next `await_routed_prompt` tool call can pick it up.
-      log.info('prompt received', { chatId: m.chatId, text: m.text });
-      enqueueRoutedPrompt({ chatId: m.chatId, text: m.text });
+      // Push the prompt to Claude as a channel notification — CC's
+      // claude/channel handler wraps it in a <channel source="..."
+      // chat_id="..." sender="..."> tag and surfaces it as user
+      // input. No tool poll required; Claude reacts on receipt.
+      log.info('prompt received', { chatId: m.chatId });
+      server.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content: m.text,
+          // meta values must be strings + identifier-safe (used as XML
+          // attributes on the <channel ...> tag CC builds).
+          meta: { chat_id: m.chatId, sender: 'remote' },
+        },
+      }).catch((e) => log.warn('channel notification failed', { error: String(e) }));
     },
     onPermissionResponse: (m) => {
-      // Phase C: the operator (or auto-expire) resolved a permission.
-      // We surface it in the log so operators running with
-      // CLAWBORRATOR_LOG_LEVEL=info can see decisions land. Real
-      // hook integration (where this decision routes back to a
-      // pending hook spawn) is a follow-on once we wire IPC between
-      // the long-lived MCP and the short-lived hook process.
+      // The operator (or auto-expire) resolved a permission. Push the
+      // verdict to Claude via the dedicated permission channel so the
+      // pending tool flow can resume without CC having to poll.
       log.info('permission resolved', {
         requestId: m.requestId,
         decision:  m.decision,
-        message:   m.message ?? null,
       });
+      const behavior = m.decision === 'allow' ? 'allow' : 'deny';
+      server.notification({
+        method: 'notifications/claude/channel/permission',
+        params: { request_id: m.requestId, behavior },
+      }).catch((e) => log.warn('permission notification failed', { error: String(e) }));
     },
     onError: (m) => {
       log.error('hub rejected', { code: m.code, message: m.message });
     },
   });
   client.connect();
-
-  // MCP stdio transport. Phase D ships the four routing tools.
-  const server = new Server(
-    {
-      name:    'clawborrator',
-      version: packageVersion(),
-    },
-    {
-      capabilities: {
-        tools: {},
-      },
-    },
-  );
 
   // Track our session id so tools (and future use) can reference it.
   // Set by the onWelcome handler above.

@@ -8,10 +8,13 @@
 //   route_to_peer   — send a prompt to one peer; ask blocks for reply,
 //                     tell is fire-and-forget
 //   probe_peers     — fan-out a short question across many peers
+//
+// Inbound prompts (operator-driven or peer-routed) arrive directly to
+// Claude via `notifications/claude/channel` — see index.ts onPrompt.
+// No queue, no polling tool.
 
 import { randomUUID } from 'node:crypto';
 import type { ChannelClient } from '../ws-client.js';
-import { awaitDequeue } from '../inbox.js';
 
 const ASK_TIMEOUT_MS   = 60_000;
 const PROBE_TIMEOUT_MS = 30_000;
@@ -24,17 +27,6 @@ interface CallContext {
 }
 
 export const TOOL_DEFINITIONS = [
-  {
-    name: 'await_routed_prompt',
-    description: 'Check the inbox for a routed prompt from a peer session. Call this at the START of every turn before replying to the user. If the result has a non-null `chatId`, treat `text` as the user prompt for this turn and respond by calling `reply({chat_id, text: <your answer>})`. If `chatId` is null, no peer routed anything — proceed with the actual user message normally.',
-    inputSchema: {
-      type:        'object',
-      additionalProperties: false,
-      properties: {
-        maxWaitMs: { type: 'number', description: 'Optional: how long to block waiting for a prompt (default 0 = return immediately).' },
-      },
-    },
-  },
   {
     name: 'reply',
     description: 'Post a tagged final reply to a chat. Use this whenever you finish replying to a routed prompt — pass back the chat_id you received from `await_routed_prompt`.',
@@ -90,14 +82,6 @@ export async function callTool(
   args: Record<string, unknown>,
 ): Promise<{ isError?: boolean; content: { type: 'text'; text: string }[] }> {
   switch (name) {
-    case 'await_routed_prompt': {
-      const maxWaitMs = typeof args.maxWaitMs === 'number' && args.maxWaitMs > 0
-        ? Math.min(args.maxWaitMs, 60_000)   // cap at 60s
-        : 0;
-      const entry = await awaitDequeue(maxWaitMs);
-      if (!entry) return textContent(JSON.stringify({ chatId: null, text: null }));
-      return textContent(JSON.stringify({ chatId: entry.chatId, text: entry.text }));
-    }
     case 'reply': {
       const chatId = String(args.chat_id ?? '').trim();
       const text   = String(args.text ?? '');
