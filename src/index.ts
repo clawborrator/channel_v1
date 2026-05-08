@@ -139,16 +139,21 @@ async function main() {
       instructions:
         `Messages from a remote operator arrive as <channel source="${SOURCE_NAME}" chat_id="..."> tags. ` +
         `Treat them as user input from someone working with you remotely. ` +
-        `When you reply, use the "reply" tool and pass back the chat_id from the inbound tag so the response routes correctly. ` +
+        `When you reply, use the "reply" tool for short atomic replies, or "reply_chunk" to stream long output progressively (the operator sees text growing live; close with done:true). Pass back the chat_id from the inbound tag in either case so the response routes correctly. ` +
         `Permission prompts may also be relayed for remote approval; the local terminal dialog stays open in parallel. ` +
-        `\n\nCross-session routing tools (gated on the operator opting in):` +
+        `\n\nCross-session routing tools (only usable when this session was published as a composable agent — isolated agents get a refusal):` +
         `\n- list_peers: see the operator's other running Claude Code sessions by routingName.` +
         `\n- route_to_peer: send one prompt to one peer; ask mode waits for their reply, tell mode is fire-and-forget.` +
         `\n- probe_peers: fan out the same short question to many peers in parallel for discovery (e.g. "do you have a User model?").` +
-        `\nWhen any of these returns "cross-session routing is disabled", tell the operator to enable it in hub Settings; don't retry. ` +
+        `\nWhen any of these returns "this agent is published in isolated mode", don't retry; tell the operator the owner can flip the agent to composable if cross-session routing is intended. ` +
         `Use them when the operator asks something that genuinely lives in a different repo, when you need information another session has in its context, or when handing off a self-contained subtask makes more sense than doing it here.` +
+        `\n\nPublic-agent dispatch (cross-tenant — agents owned by other operators):` +
+        `\n- list_agents: discover public agents on the hub. Returns handle, name, tagline, online, mine, isolated flags. Use this when the operator asks "what agents are available" or "find an agent that knows X" — list_peers ONLY shows the operator's own sessions; list_agents shows the public registry.` +
+        `\n- dispatch_to_agent: invoke a published agent by <owner>/<slug> handle (e.g. MRIIOT/orchard-api). Use this when the operator references an agent that isn't in your list_peers — list_peers only shows the OPERATOR'S OWN sessions, not the public agent registry. ask mode waits for the agent's reply (15 min cap); tell mode is fire-and-forget.` +
         `\n\nFile attachments:` +
         `\n- attach_file: upload a file from your project as a chat attachment. Use it when the operator should be able to download something you produced (logs, charts, exports). Pass a path inside your cwd; symlinks pointing outside are refused. Returns a fileId — mention it in your reply text so the operator can find the chip on their dashboard.` +
+        `\n- read_file: fetch the bytes of a file by fileId. ALWAYS call this first when a prompt mentions \`fileId=N\` and the content is text — those files live on the hub, not on your local FS, so you cannot read them with the regular Read tool. Returns text-mime content inline (1 MB cap); binary files return an error with metadata pointing at download_to_path.` +
+        `\n- download_to_path: fetch a hub file to a path under your cwd. Use this for binaries (PDFs, images, archives, video) that read_file refuses, or whenever you need bytes on local disk for processing (Bash + pdftoppm, Read on an image, unzip, etc.). Parent dirs auto-created; target must not already exist. Returns the relative path so you can immediately operate on the file with Read or Bash.` +
         `\n\nPeer reports: when you dispatched work to a peer with route_to_peer in tell mode, the peer's eventual reply arrives here as a normal channel notification tagged "[peer report from @<peer> via cross-session routing — informational, no reply required]". React by closing the matching task (TaskUpdate), surfacing a one-line status update to the operator, or routing a follow-up — but DO NOT call the reply tool on a peer-report chat_id; the operator already saw the report on their dashboard.`,
     },
   );

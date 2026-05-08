@@ -52,6 +52,41 @@ export function readTranscriptMessages(path: string, tailBytes: number = DEFAULT
   }
 }
 
+// Find the index of the assistant message whose content[] holds the
+// tool_use with the given id. Returns -1 if not present (e.g. CC
+// hasn't flushed the deciding assistant message to disk yet).
+function findToolUseIndex(messages: TranscriptMessage[], toolUseId: string): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.type !== 'assistant') continue;
+    const content = m.message?.content;
+    if (!Array.isArray(content)) continue;
+    if (content.some((c) => c?.type === 'tool_use' && c.id === toolUseId)) return i;
+  }
+  return -1;
+}
+
+// Walk backward from `startIdx-1` through preceding assistant
+// messages, stopping at the first `user` boundary. For each
+// assistant message, invoke `visit(content)` — visit returns true to
+// short-circuit (used by the thinking-presence check). Returns
+// whether visit ever returned true.
+function walkAssistantBlocksBefore(
+  messages: TranscriptMessage[],
+  startIdx: number,
+  visit: (content: ContentBlock[]) => boolean,
+): boolean {
+  for (let i = startIdx - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.type === 'user') break;
+    if (m?.type !== 'assistant') continue;
+    const content = m.message?.content;
+    if (!Array.isArray(content)) continue;
+    if (visit(content)) return true;
+  }
+  return false;
+}
+
 // Pull text blocks Claude wrote between the prior tool turn and the
 // tool_use about to fire. CC stores each content-block kind in its
 // own assistant message in the transcript JSONL — even though the
@@ -68,26 +103,11 @@ export function extractTextBlocksBeforeToolUse(
   toolUseId: string,
 ): string[] {
   if (!toolUseId || !Array.isArray(messages)) return [];
-  let targetIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.type !== 'assistant') continue;
-    const content = m.message?.content;
-    if (!Array.isArray(content)) continue;
-    if (content.some((c) => c?.type === 'tool_use' && c.id === toolUseId)) {
-      targetIdx = i;
-      break;
-    }
-  }
+  const targetIdx = findToolUseIndex(messages, toolUseId);
   if (targetIdx < 0) return [];
 
   const out: string[] = [];
-  for (let i = targetIdx - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.type === 'user') break;
-    if (m?.type !== 'assistant') continue;
-    const content = m.message?.content;
-    if (!Array.isArray(content)) continue;
+  walkAssistantBlocksBefore(messages, targetIdx, (content) => {
     // Walk THIS message's content array backward; unshift to keep the
     // final list in chronological order.
     for (let j = content.length - 1; j >= 0; j--) {
@@ -96,7 +116,8 @@ export function extractTextBlocksBeforeToolUse(
         out.unshift(c.text);
       }
     }
-  }
+    return false;
+  });
   return out;
 }
 
@@ -106,14 +127,7 @@ export function extractTextBlocksBeforeToolUse(
 // give up).
 export function messageContainsToolUse(messages: TranscriptMessage[], toolUseId: string): boolean {
   if (!toolUseId || !Array.isArray(messages)) return false;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.type !== 'assistant') continue;
-    const content = m.message?.content;
-    if (!Array.isArray(content)) continue;
-    if (content.some((c) => c?.type === 'tool_use' && c.id === toolUseId)) return true;
-  }
-  return false;
+  return findToolUseIndex(messages, toolUseId) >= 0;
 }
 
 // Same walk-back as extractTextBlocksBeforeToolUse, but returns true
@@ -127,27 +141,11 @@ export function hasThinkingBlocksBeforeToolUse(
   toolUseId: string,
 ): boolean {
   if (!toolUseId || !Array.isArray(messages)) return false;
-  let targetIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.type !== 'assistant') continue;
-    const content = m.message?.content;
-    if (!Array.isArray(content)) continue;
-    if (content.some((c) => c?.type === 'tool_use' && c.id === toolUseId)) {
-      targetIdx = i;
-      break;
-    }
-  }
+  const targetIdx = findToolUseIndex(messages, toolUseId);
   if (targetIdx < 0) return false;
-  for (let i = targetIdx - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.type === 'user') break;
-    if (m?.type !== 'assistant') continue;
-    const content = m.message?.content;
-    if (!Array.isArray(content)) continue;
-    if (content.some((c) => c?.type === 'thinking')) return true;
-  }
-  return false;
+  return walkAssistantBlocksBefore(messages, targetIdx, (content) =>
+    content.some((c) => c?.type === 'thinking'),
+  );
 }
 
 // Walk a content array and return joined text from blocks AFTER the

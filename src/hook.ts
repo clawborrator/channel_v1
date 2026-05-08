@@ -100,6 +100,15 @@ async function postEvent(sidecar: SidecarPayload, body: PostBody, timeoutMs: num
   }
 }
 
+// Returns true if payload already has a populated string-shaped
+// alternative (`text` / `response`) — caller should bail out and let
+// downstream use it instead of overwriting with assistant_text.
+function hasStringShapedReply(payload: Record<string, unknown>): boolean {
+  if (typeof payload.text === 'string' && (payload.text as string).trim()) return true;
+  if (typeof payload.response === 'string' && (payload.response as string).trim()) return true;
+  return false;
+}
+
 // Stop / SubagentStop: try to populate payload.assistant_text from
 // (in order) last_assistant_message → existing payload fields →
 // transcript tail. Mutates payload in place.
@@ -113,12 +122,7 @@ async function enrichStopAssistantText(payload: Record<string, unknown>, hookNam
     return;
   }
 
-  if (
-    typeof payload.text     === 'string' && (payload.text     as string).trim() ||
-    typeof payload.response === 'string' && (payload.response as string).trim()
-  ) {
-    return; // a string-shaped variant is already there; let downstream use it
-  }
+  if (hasStringShapedReply(payload)) return;
 
   const transcriptPath = typeof payload.transcript_path === 'string' ? payload.transcript_path : '';
   if (!transcriptPath) {
@@ -141,25 +145,31 @@ async function enrichStopAssistantText(payload: Record<string, unknown>, hookNam
   }
 }
 
-// PreToolUse: ship every text block Claude wrote in the same
-// assistant message BEFORE this tool_use as its own chat/assistant_text
-// event. If no text blocks but extended-thinking blocks were present
-// (CC strips thinking plaintext on disk; only the signature survives),
-// ship a single placeholder so the operator sees a "claude was
-// thinking here" marker.
-async function shipPreToolAssistantText(
-  sidecar: SidecarPayload,
-  payload: Record<string, unknown>,
-): Promise<void> {
+// Pull + normalize the PreToolUse-relevant fields off the hook
+// payload. Returns null when essential identifiers are missing or
+// the tool is on the skip-list (e.g. mcp__clawborrator__reply, where
+// the WS path already routes the user-facing answer).
+function parsePreToolPayload(payload: Record<string, unknown>): {
+  transcriptPath: string;
+  toolUseId:      string;
+} | null {
   const transcriptPath = typeof payload.transcript_path === 'string' ? payload.transcript_path : '';
   const toolUseId      = String(payload.tool_use_id ?? payload.toolUseId ?? '');
   const toolName       = String(payload.tool_name   ?? payload.toolName  ?? '');
-  if (!transcriptPath || !toolUseId) return;
-  if (TOOLS_SKIPPED_FOR_PRE_TEXT.has(toolName)) return;
+  if (!transcriptPath || !toolUseId) return null;
+  if (TOOLS_SKIPPED_FOR_PRE_TEXT.has(toolName)) return null;
+  return { transcriptPath, toolUseId };
+}
 
-  // Race-retry: CC writes the assistant message that DECIDED the
-  // tool_use to the transcript ASYNC, so a fresh read right after the
-  // hook fires can miss it. Retry up to 4 times with 80ms delays.
+// Race-retry: CC writes the assistant message that DECIDED the
+// tool_use to the transcript ASYNC, so a fresh read right after the
+// hook fires can miss it. Retry up to 4 times with 80ms delays.
+// Returns the latest messages array + whether the target was ever
+// found + retry count.
+async function readTranscriptWithRetry(
+  transcriptPath: string,
+  toolUseId: string,
+): Promise<{ messages: ReturnType<typeof readTranscriptMessages>; foundTarget: boolean; retries: number }> {
   let messages = readTranscriptMessages(transcriptPath, DEFAULT_TAIL_BYTES);
   let foundTarget = messageContainsToolUse(messages, toolUseId);
   let retries = 0;
@@ -169,22 +179,20 @@ async function shipPreToolAssistantText(
     foundTarget = messageContainsToolUse(messages, toolUseId);
     retries++;
   }
+  return { messages, foundTarget, retries };
+}
 
-  const blocks = extractTextBlocksBeforeToolUse(messages, toolUseId);
-  const hasThinking = blocks.length === 0 ? hasThinkingBlocksBeforeToolUse(messages, toolUseId) : false;
-
-  log.debug('PreToolUse extract', {
-    toolUseId:    toolUseId.slice(0, 24),
-    messages:     messages.length,
-    targetFound:  foundTarget,
-    retries,
-    blocks:       blocks.length,
-    placeholder:  hasThinking,
-  });
-
-  // Monotonic timestamps so events sort chronologically on the hub
-  // (chat_events orders by ts; ties broken by id, but ts ordering is
-  // the human signal). We use ms epoch then convert to ISO.
+// Build + dispatch the per-block AssistantText POSTs (or a single
+// placeholder when only extended-thinking happened). Monotonic
+// timestamps so events sort chronologically on the hub (chat_events
+// orders by ts; ties broken by id, but ts ordering is the human
+// signal).
+async function postPreToolAssistantBlocks(
+  sidecar: SidecarPayload,
+  blocks: string[],
+  hasThinking: boolean,
+  toolUseId: string,
+): Promise<void> {
   const baseMs = Date.now();
   const tsAt = (i: number) => new Date(baseMs + i).toISOString();
 
@@ -200,7 +208,9 @@ async function shipPreToolAssistantText(
         ts:        tsAt(i),
       }, 800),
     ));
-  } else if (hasThinking) {
+    return;
+  }
+  if (hasThinking) {
     await postEvent(sidecar, {
       sessionId: sidecar.sessionId,
       kind:      'chat',
@@ -215,13 +225,40 @@ async function shipPreToolAssistantText(
   }
 }
 
-export async function runHook(hookName: string): Promise<void> {
-  const map = HOOK_TO_EVENT[hookName];
-  if (!map) {
-    log.warn('unknown hook name; skipping', { hookName });
-    process.exit(0);
-  }
+// PreToolUse: ship every text block Claude wrote in the same
+// assistant message BEFORE this tool_use as its own chat/assistant_text
+// event. If no text blocks but extended-thinking blocks were present
+// (CC strips thinking plaintext on disk; only the signature survives),
+// ship a single placeholder so the operator sees a "claude was
+// thinking here" marker.
+async function shipPreToolAssistantText(
+  sidecar: SidecarPayload,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const parsed = parsePreToolPayload(payload);
+  if (!parsed) return;
+  const { transcriptPath, toolUseId } = parsed;
 
+  const { messages, foundTarget, retries } = await readTranscriptWithRetry(transcriptPath, toolUseId);
+  const blocks = extractTextBlocksBeforeToolUse(messages, toolUseId);
+  const hasThinking = blocks.length === 0 ? hasThinkingBlocksBeforeToolUse(messages, toolUseId) : false;
+
+  log.debug('PreToolUse extract', {
+    toolUseId:    toolUseId.slice(0, 24),
+    messages:     messages.length,
+    targetFound:  foundTarget,
+    retries,
+    blocks:       blocks.length,
+    placeholder:  hasThinking,
+  });
+
+  await postPreToolAssistantBlocks(sidecar, blocks, hasThinking, toolUseId);
+}
+
+// Read stdin → echo to stdout (preserve CC hook chain) → parse JSON.
+// Falls back to a {rawStdin} record if the payload doesn't parse so
+// the operator still sees something on the wire.
+async function readAndEchoHookPayload(): Promise<Record<string, unknown>> {
   const stdinRaw = await readStdin();
   // Always echo stdin so Claude's hook chain sees the original payload.
   if (stdinRaw) process.stdout.write(stdinRaw);
@@ -232,6 +269,64 @@ export async function runHook(hookName: string): Promise<void> {
   } catch {
     payload = { rawStdin: stdinRaw.slice(0, 2000) };
   }
+  return payload;
+}
+
+// Stop-specific pre-event handler: enrich + ship chat/reply if a real
+// final-answer text was recovered. The tail Stop event posted by the
+// caller marks the turn boundary independently.
+async function runStop(sidecar: SidecarPayload, payload: Record<string, unknown>): Promise<void> {
+  await enrichStopAssistantText(payload, 'Stop');
+  const reply = typeof payload.assistant_text === 'string' ? payload.assistant_text.trim() : '';
+  if (!reply) return;
+  await postEvent(sidecar, {
+    sessionId: sidecar.sessionId,
+    kind:      'chat',
+    type:      'reply',
+    payload:   { text: reply },
+    ts:        new Date().toISOString(),
+  }, 2000);
+}
+
+// Per-hook pre-enrichment dispatch. Mutates payload in place where
+// the variant needs to (Stop's assistant_text path) and may emit
+// chat-lane events. SubagentStop intentionally does NOTHING here —
+// see comment below; we only record the tail event.
+async function dispatchHookEnrichment(
+  hookName: string,
+  sidecar: SidecarPayload,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  if (hookName === 'Stop') {
+    // Real turn end — extract final answer + ship chat/reply so
+    // attached operators see Claude's response in the chat lane.
+    // The tail Stop event below marks the boundary.
+    await runStop(sidecar, payload);
+    return;
+  }
+  if (hookName === 'SubagentStop') {
+    // A Task-tool subagent finished. NOT a final-answer event — the
+    // parent agent is still running and will fire its own Stop later.
+    // Some CC versions populate `last_assistant_message` with the
+    // subagent's INPUT prompt rather than its reply, which previously
+    // surfaced as a misleading chat/reply row. We still record the
+    // tail event below for activity-lane visibility, but skip the
+    // chat/reply ship entirely.
+    return;
+  }
+  if (hookName === 'PreToolUse') {
+    await shipPreToolAssistantText(sidecar, payload);
+  }
+}
+
+export async function runHook(hookName: string): Promise<void> {
+  const map = HOOK_TO_EVENT[hookName];
+  if (!map) {
+    log.warn('unknown hook name; skipping', { hookName });
+    process.exit(0);
+  }
+
+  const payload = await readAndEchoHookPayload();
 
   const sidecar: SidecarPayload | null = findSidecar(process.cwd());
   if (!sidecar) {
@@ -240,32 +335,7 @@ export async function runHook(hookName: string): Promise<void> {
   }
 
   try {
-    if (hookName === 'Stop') {
-      // Real turn end — extract final answer + ship chat/reply so
-      // attached operators see Claude's response in the chat lane.
-      // The tail Stop event below marks the boundary.
-      await enrichStopAssistantText(payload, hookName);
-      const reply = typeof payload.assistant_text === 'string' ? payload.assistant_text.trim() : '';
-      if (reply) {
-        await postEvent(sidecar, {
-          sessionId: sidecar.sessionId,
-          kind:      'chat',
-          type:      'reply',
-          payload:   { text: reply },
-          ts:        new Date().toISOString(),
-        }, 2000);
-      }
-    } else if (hookName === 'SubagentStop') {
-      // A Task-tool subagent finished. NOT a final-answer event — the
-      // parent agent is still running and will fire its own Stop later.
-      // Some CC versions populate `last_assistant_message` with the
-      // subagent's INPUT prompt rather than its reply, which previously
-      // surfaced as a misleading chat/reply row. We still record the
-      // tail event below for activity-lane visibility, but skip the
-      // chat/reply ship entirely.
-    } else if (hookName === 'PreToolUse') {
-      await shipPreToolAssistantText(sidecar, payload);
-    }
+    await dispatchHookEnrichment(hookName, sidecar, payload);
   } catch (e: any) {
     log.warn('pre-event enrichment threw', { error: e?.message ?? String(e), hookName });
   }

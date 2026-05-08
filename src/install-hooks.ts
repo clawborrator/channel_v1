@@ -81,6 +81,85 @@ function findBundledHookFile(): string | null {
   return null;
 }
 
+// Read settings.json (tolerate missing/empty) and return the parsed
+// SettingsShape + the original raw text (used later to skip the
+// rewrite when nothing changed). Returns null on JSON parse failure
+// — caller should leave the file alone in that case.
+function loadOrInitHookSettings(settingsPath: string): { s: SettingsShape; originalText: string } | null {
+  if (!existsSync(settingsPath)) return { s: {}, originalText: '' };
+  try {
+    const originalText = readFileSync(settingsPath, 'utf8');
+    if (!originalText.trim()) return { s: {}, originalText };
+    return { s: JSON.parse(originalText) as SettingsShape, originalText };
+  } catch (e: any) {
+    log.warn('install-hooks: settings.json unparseable, leaving alone', { error: e?.message ?? String(e) });
+    return null;
+  }
+}
+
+// Mirror the bundled hook .mjs into `.claude/hooks/clawborrator-
+// tail.mjs` if absent or byte-different. Returns whether we touched
+// the file. Bundle bytes already in hand from `findBundledHookFile`.
+function syncBundledHookFile(hookFile: string, bundleBytes: Buffer): boolean {
+  if (!existsSync(hookFile) || !readFileSync(hookFile).equals(bundleBytes)) {
+    writeFileSync(hookFile, bundleBytes);
+    try { chmodSync(hookFile, 0o755); } catch { /* Windows */ }
+    return true;
+  }
+  return false;
+}
+
+// Decide what to do with our hook entry inside one event's `hooks[]`
+// list. 'add' means no entry exists yet, 'refresh' means our entry's
+// command is stale, 'noop' means it's already exactly right.
+function decideHookAction(
+  entry: ClaudeHook,
+  desiredCmd: string,
+): 'add' | 'refresh' | 'noop' {
+  const existingIdx = entry.hooks.findIndex(isOurHook);
+  if (existingIdx < 0) return 'add';
+  if (entry.hooks[existingIdx].command !== desiredCmd) return 'refresh';
+  return 'noop';
+}
+
+// Apply the chosen action to the entry's hooks[] list, mutating in
+// place. Idempotent on 'noop'; replaces for 'refresh'; appends for
+// 'add'.
+function materializeHookEntry(
+  entry: ClaudeHook,
+  desiredCmd: string,
+  action: 'add' | 'refresh' | 'noop',
+): void {
+  if (action === 'noop') return;
+  if (action === 'refresh') {
+    const existingIdx = entry.hooks.findIndex(isOurHook);
+    entry.hooks[existingIdx] = { type: 'command', command: desiredCmd };
+    return;
+  }
+  // add
+  entry.hooks.push({ type: 'command', command: desiredCmd });
+}
+
+// Per-event update: ensures the catch-all `.* matcher` row exists,
+// then resolves + applies the action. Returns the action so the
+// caller can tally counts.
+function reconcileHookEvent(
+  s: SettingsShape,
+  name: string,
+  hookFile: string,
+): 'add' | 'refresh' | 'noop' {
+  const arr: ClaudeHook[] = (s.hooks![name] ??= []);
+  let entry: ClaudeHook | undefined = arr.find((e: ClaudeHook) => (e.matcher ?? '.*') === '.*');
+  if (!entry) {
+    entry = { matcher: '.*', hooks: [] };
+    arr.push(entry);
+  }
+  const desiredCmd = hookCommand(name, hookFile);
+  const action = decideHookAction(entry, desiredCmd);
+  materializeHookEntry(entry, desiredCmd, action);
+  return action;
+}
+
 /**
  * Install/maintain .claude/settings.json + .claude/hooks/clawborrator-
  * tail.mjs for the project at `cwd`. Returns a summary describing what
@@ -112,48 +191,22 @@ export function installHooks(cwd: string): {
   //    already on disk. Compare exact bytes — cheaper than hashing
   //    and good enough for files this small.
   const bundleBytes = readFileSync(bundleSource);
-  let hookFileWritten = false;
-  if (!existsSync(hookFile) || !readFileSync(hookFile).equals(bundleBytes)) {
-    writeFileSync(hookFile, bundleBytes);
-    try { chmodSync(hookFile, 0o755); } catch { /* Windows */ }
-    hookFileWritten = true;
-  }
+  const hookFileWritten = syncBundledHookFile(hookFile, bundleBytes);
 
   // 2) Read existing settings.json (tolerate missing/empty).
-  let s: SettingsShape = {};
-  let originalText = '';
-  if (existsSync(settings)) {
-    try {
-      originalText = readFileSync(settings, 'utf8');
-      if (originalText.trim()) s = JSON.parse(originalText);
-    } catch (e: any) {
-      log.warn('install-hooks: settings.json unparseable, leaving alone', { error: e?.message ?? String(e) });
-      return { hookFileWritten, settingsWritten: false, added: 0, refreshed: 0, alreadyOk: 0, hookFilePath: hookFile };
-    }
+  const loaded = loadOrInitHookSettings(settings);
+  if (!loaded) {
+    return { hookFileWritten, settingsWritten: false, added: 0, refreshed: 0, alreadyOk: 0, hookFilePath: hookFile };
   }
+  const { s, originalText } = loaded;
   if (!s.hooks) s.hooks = {};
 
   let added = 0, refreshed = 0, alreadyOk = 0;
   for (const name of HOOK_NAMES) {
-    const arr: ClaudeHook[] = (s.hooks![name] ??= []);
-    let entry: ClaudeHook | undefined = arr.find((e: ClaudeHook) => (e.matcher ?? '.*') === '.*');
-    if (!entry) {
-      entry = { matcher: '.*', hooks: [] };
-      arr.push(entry);
-    }
-    const desiredCmd = hookCommand(name, hookFile);
-    const existingIdx = entry.hooks.findIndex(isOurHook);
-    if (existingIdx >= 0) {
-      if (entry.hooks[existingIdx].command !== desiredCmd) {
-        entry.hooks[existingIdx] = { type: 'command', command: desiredCmd };
-        refreshed++;
-      } else {
-        alreadyOk++;
-      }
-    } else {
-      entry.hooks.push({ type: 'command', command: desiredCmd });
-      added++;
-    }
+    const action = reconcileHookEvent(s, name, hookFile);
+    if (action === 'add') added++;
+    else if (action === 'refresh') refreshed++;
+    else alreadyOk++;
   }
 
   // 3) Write only if the serialized form changed.

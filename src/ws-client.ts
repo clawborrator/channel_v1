@@ -23,12 +23,14 @@ import type { ChannelConfig } from './config.js';
 // price than carrying a peer dep.
 type Outbound =
   | { type: 'register'; host: string; cwd: string; osUser: string | null; pid: number; channelVersion: string; sessionId: string | null }
-  | { type: 'chat_event'; eventType: 'prompt' | 'reply'; payload: Record<string, unknown>; ts: string }
+  | { type: 'chat_event'; eventType: 'prompt' | 'reply' | 'reply_chunk'; payload: Record<string, unknown>; ts: string }
   | { type: 'tail_event'; eventType: 'PreToolUse' | 'PostToolUse' | 'Stop' | 'Notification' | 'UserPromptSubmit'; payload: Record<string, unknown>; ts: string }
   | { type: 'permission_request'; requestId: string; tool: string; inputPreview: string; ts: string }
   | { type: 'route_request'; correlationId: string; peer: string; prompt: string; mode: 'ask' | 'tell' }
   | { type: 'probe_request'; correlationId: string; peers: string[] | null; prompt: string }
   | { type: 'list_peers_request'; correlationId: string }
+  | { type: 'list_agents_request'; correlationId: string; q?: string }
+  | { type: 'dispatch_request'; correlationId: string; handle: string; prompt: string; mode: 'ask' | 'tell' }
   | { type: 'pong'; ts: string };
 
 type Inbound =
@@ -39,6 +41,7 @@ type Inbound =
   | { type: 'route_reply'; routeId: string; fromName: string; text: string; ts: string; origin?: 'operator' | 'mcp' }
   | { type: 'probe_response'; correlationId: string; peerLogin: string | null; answer: string | null; done?: boolean }
   | { type: 'list_peers_response'; correlationId: string; peers: { login: string; name: string; online: boolean }[] }
+  | { type: 'list_agents_response'; correlationId: string; callerLogin: string; agents: { handle: string; ownerLogin: string; name: string; tagline: string; online: boolean; mine: boolean; isolated: boolean }[] }
   | { type: 'peers_update'; peers: { login: string; name: string; online: boolean }[] }
   | { type: 'bye'; reason: string; retry: boolean }
   | { type: 'ping'; ts: string }
@@ -187,71 +190,99 @@ export class ChannelClient {
       return;
     }
     log.debug('recv', { type: msg.type });
+    // Each per-frame handler lives as a private method so this
+    // dispatcher stays a flat switch. Handlers are responsible for
+    // their own pending-correlation lookups + handler fan-outs.
     switch (msg.type) {
-      case 'welcome':
-        this.currentSessionId = msg.sessionId;
-        log.info('welcomed', { sessionId: msg.sessionId, routingName: msg.routingName });
-        this.handlers.onWelcome?.(msg);
-        break;
-      case 'ping':
-        this.send({ type: 'pong', ts: new Date().toISOString() });
-        break;
-      case 'prompt':
-        this.handlers.onPrompt?.(msg);
-        break;
-      case 'route_reply':
-        this.handlers.onRouteReply?.(msg);
-        break;
-      case 'permission_response':
-        this.handlers.onPermissionResponse?.(msg);
-        break;
-      case 'peers_update':
-        this.handlers.onPeersUpdate?.(msg);
-        break;
-      case 'list_peers_response': {
-        const p = this.pending.get(msg.correlationId);
-        if (p && p.kind === 'single') {
-          clearTimeout(p.timer);
-          this.pending.delete(msg.correlationId);
-          p.resolve(msg.peers);
-        }
-        break;
-      }
-      case 'route_response': {
-        const p = this.pending.get(msg.correlationId);
-        if (p && p.kind === 'single') {
-          clearTimeout(p.timer);
-          this.pending.delete(msg.correlationId);
-          p.resolve({ peerLogin: msg.peerLogin, reply: msg.reply });
-        }
-        break;
-      }
-      case 'probe_response': {
-        const p = this.pending.get(msg.correlationId);
-        if (!p || p.kind !== 'probe') break;
-        if (msg.done) {
-          clearTimeout(p.timer);
-          this.pending.delete(msg.correlationId);
-          p.resolve(p.results);
-        } else if (msg.peerLogin) {
-          p.results.push({ peerLogin: msg.peerLogin, answer: msg.answer });
-        }
-        break;
-      }
-      case 'bye':
-        log.info('bye from hub', { reason: msg.reason, retry: msg.retry });
-        if (!msg.retry) this.stopped = true;
-        break;
-      case 'error':
-        log.error('hub error', { code: msg.code, message: msg.message });
-        this.handlers.onError?.(msg);
-        // Auth failures are fatal — don't loop on a revoked token.
-        if (msg.code === 'auth_failed' || msg.code === 'token_revoked') {
-          this.stopped = true;
-          this.ws?.close(1008, msg.code);
-          process.exit(2);
-        }
-        break;
+      case 'welcome':              this.onWelcomeMsg(msg);              break;
+      case 'ping':                 this.onPingMsg();                    break;
+      case 'prompt':               this.onPromptMsg(msg);               break;
+      case 'route_reply':          this.onRouteReplyMsg(msg);           break;
+      case 'permission_response':  this.onPermissionResponseMsg(msg);   break;
+      case 'peers_update':         this.onPeersUpdateMsg(msg);          break;
+      case 'list_peers_response':  this.onListPeersResponse(msg);       break;
+      case 'list_agents_response': this.onListAgentsResponse(msg);      break;
+      case 'route_response':       this.onRouteResponse(msg);           break;
+      case 'probe_response':       this.onProbeResponse(msg);           break;
+      case 'bye':                  this.onByeMsg(msg);                  break;
+      case 'error':                this.onErrorMsg(msg);                break;
+    }
+  }
+
+  private onWelcomeMsg(msg: Extract<Inbound, { type: 'welcome' }>): void {
+    this.currentSessionId = msg.sessionId;
+    log.info('welcomed', { sessionId: msg.sessionId, routingName: msg.routingName });
+    this.handlers.onWelcome?.(msg);
+  }
+
+  private onPingMsg(): void {
+    this.send({ type: 'pong', ts: new Date().toISOString() });
+  }
+
+  private onPromptMsg(msg: Extract<Inbound, { type: 'prompt' }>): void {
+    this.handlers.onPrompt?.(msg);
+  }
+
+  private onRouteReplyMsg(msg: Extract<Inbound, { type: 'route_reply' }>): void {
+    this.handlers.onRouteReply?.(msg);
+  }
+
+  private onPermissionResponseMsg(msg: Extract<Inbound, { type: 'permission_response' }>): void {
+    this.handlers.onPermissionResponse?.(msg);
+  }
+
+  private onPeersUpdateMsg(msg: Extract<Inbound, { type: 'peers_update' }>): void {
+    this.handlers.onPeersUpdate?.(msg);
+  }
+
+  // Resolve the pending single-response request for a given
+  // correlationId with a caller-supplied value extracted from the
+  // inbound frame. No-ops if nothing was waiting (timed out earlier).
+  private resolveSinglePending(correlationId: string, value: unknown): void {
+    const p = this.pending.get(correlationId);
+    if (!p || p.kind !== 'single') return;
+    clearTimeout(p.timer);
+    this.pending.delete(correlationId);
+    p.resolve(value);
+  }
+
+  private onListPeersResponse(msg: Extract<Inbound, { type: 'list_peers_response' }>): void {
+    this.resolveSinglePending(msg.correlationId, msg.peers);
+  }
+
+  private onListAgentsResponse(msg: Extract<Inbound, { type: 'list_agents_response' }>): void {
+    this.resolveSinglePending(msg.correlationId, { agents: msg.agents, callerLogin: msg.callerLogin });
+  }
+
+  private onRouteResponse(msg: Extract<Inbound, { type: 'route_response' }>): void {
+    this.resolveSinglePending(msg.correlationId, { peerLogin: msg.peerLogin, reply: msg.reply });
+  }
+
+  private onProbeResponse(msg: Extract<Inbound, { type: 'probe_response' }>): void {
+    const p = this.pending.get(msg.correlationId);
+    if (!p || p.kind !== 'probe') return;
+    if (msg.done) {
+      clearTimeout(p.timer);
+      this.pending.delete(msg.correlationId);
+      p.resolve(p.results);
+    } else if (msg.peerLogin) {
+      p.results.push({ peerLogin: msg.peerLogin, answer: msg.answer });
+    }
+  }
+
+  private onByeMsg(msg: Extract<Inbound, { type: 'bye' }>): void {
+    log.info('bye from hub', { reason: msg.reason, retry: msg.retry });
+    if (!msg.retry) this.stopped = true;
+  }
+
+  private onErrorMsg(msg: Extract<Inbound, { type: 'error' }>): void {
+    log.error('hub error', { code: msg.code, message: msg.message });
+    this.handlers.onError?.(msg);
+    // Auth failures are fatal — don't loop on a revoked token.
+    if (msg.code === 'auth_failed' || msg.code === 'token_revoked') {
+      this.stopped = true;
+      this.ws?.close(1008, msg.code);
+      process.exit(2);
     }
   }
 
