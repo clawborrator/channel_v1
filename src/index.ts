@@ -147,9 +147,17 @@ async function main() {
         `\n- probe_peers: fan out the same short question to many peers in parallel for discovery (e.g. "do you have a User model?").` +
         `\nWhen any of these returns "cross-session routing is disabled", tell the operator to enable it in hub Settings; don't retry. ` +
         `Use them when the operator asks something that genuinely lives in a different repo, when you need information another session has in its context, or when handing off a self-contained subtask makes more sense than doing it here.` +
+        `\n\nFile attachments:` +
+        `\n- attach_file: upload a file from your project as a chat attachment. Use it when the operator should be able to download something you produced (logs, charts, exports). Pass a path inside your cwd; symlinks pointing outside are refused. Returns a fileId — mention it in your reply text so the operator can find the chip on their dashboard.` +
         `\n\nPeer reports: when you dispatched work to a peer with route_to_peer in tell mode, the peer's eventual reply arrives here as a normal channel notification tagged "[peer report from @<peer> via cross-session routing — informational, no reply required]". React by closing the matching task (TaskUpdate), surfacing a one-line status update to the operator, or routing a follow-up — but DO NOT call the reply tool on a peer-report chat_id; the operator already saw the report on their dashboard.`,
     },
   );
+
+  // Track our session id so tools can reference it. Set by the
+  // onWelcome handler below — closures referenced this variable
+  // before, but the assignment was missing, so attach_file (and
+  // any other sessionId-dependent tool) would always see null.
+  let toolCtxSessionId: string | null = null;
 
   // Open the channel-side WS to hub.
   const client = new ChannelClient(config, {
@@ -159,6 +167,7 @@ async function main() {
         routingName:  m.routingName,
         channelToken: m.channelTokenName,
       });
+      toolCtxSessionId = m.sessionId;
       // Persist the hub-issued session id so the NEXT cold boot of
       // this MCP rebinds the same row instead of minting a sibling
       // (same routing name, different UUID — class of bug we hit
@@ -214,22 +223,29 @@ async function main() {
     onRouteReply: (m) => {
       // A peer this session routed a prompt to (via either route_to_peer
       // MCP tool OR via a TUI @-redirect anchored on this session) has
-      // replied. Forward to Claude as a channel notification with the
-      // [peer report] prefix so it's surfaced to context but Claude
-      // doesn't reflexively call `reply` on it. Same convention old
-      // channel/channel.js:736 uses.
-      log.info('route_reply received', { routeId: m.routeId, from: m.fromName });
+      // replied. Forward to Claude as a channel notification with a
+      // [peer report] / [operator-route reply] prefix so it's surfaced
+      // to context but Claude doesn't reflexively call `reply` on it.
+      // origin distinguishes the two paths so the framing matches:
+      //   - 'operator' → operator typed `@peer text` in their attach
+      //                  TUI; they already saw the answer there. This
+      //                  Claude is in the loop only because the route
+      //                  was anchored on its session — no task to
+      //                  close, no follow-up expected unless the
+      //                  operator says so.
+      //   - 'mcp' (or unset) → this Claude called route_to_peer; close
+      //                       the matching task or route a follow-up.
+      log.info('route_reply received', { routeId: m.routeId, from: m.fromName, origin: m.origin ?? 'mcp' });
       const fromTag = m.fromName ? '@' + m.fromName.replace(/^@/, '') : 'peer';
       const sender  = (m.fromName || 'peer').replace(/^@/, '').replace(/[^A-Za-z0-9_]/g, '_');
+      const prefix = m.origin === 'operator'
+        ? `[operator-route reply from ${fromTag} via cross-session routing — fyi, the operator dispatched this through your session and already saw the answer in their TUI; no action needed unless they ask. Don't call the reply tool on this chat_id.]`
+        : `[peer report from ${fromTag} via cross-session routing — informational, no reply required] Use TaskUpdate / TaskGet to close out tracked work, or route_to_peer to follow up. Don't call the reply tool on this chat_id.`;
       server.notification({
         method: 'notifications/claude/channel',
         params: {
-          content:
-            `[peer report from ${fromTag} via cross-session routing — informational, no reply required] ` +
-            `Use TaskUpdate / TaskGet to close out tracked work, or route_to_peer to follow up. ` +
-            `Don't call the reply tool on this chat_id.\n\n` +
-            String(m.text ?? ''),
-          meta: { chat_id: `peer_${m.routeId}`, sender },
+          content: `${prefix}\n\n${String(m.text ?? '')}`,
+          meta:    { chat_id: `peer_${m.routeId}`, sender, origin: m.origin ?? 'mcp' },
         },
       }).catch((e) => log.warn('route_reply notification failed', { error: String(e) }));
     },
@@ -239,10 +255,6 @@ async function main() {
   });
   client.connect();
 
-  // Track our session id so tools (and future use) can reference it.
-  // Set by the onWelcome handler above.
-  let toolCtxSessionId: string | null = null;
-
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: TOOL_DEFINITIONS.map((t) => ({
       name:        t.name,
@@ -251,9 +263,19 @@ async function main() {
     })),
   }));
 
+  // Hub URL in http(s):// form — channel WS speaks ws(s)://, but
+  // attach_file uses fetch + multipart which need http(s)://.
+  const httpHubUrl = config.hubUrl.replace(/^ws/i, 'http');
+
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
-    return await callTool({ client, sessionId: toolCtxSessionId }, req.params.name, args);
+    return await callTool({
+      client,
+      sessionId:    toolCtxSessionId,
+      cwd,
+      httpHubUrl,
+      channelToken: config.token,
+    }, req.params.name, args);
   });
   void toolCtxSessionId;
 

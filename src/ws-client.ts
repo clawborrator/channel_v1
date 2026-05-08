@@ -36,7 +36,7 @@ type Inbound =
   | { type: 'prompt'; chatId: string; text: string }
   | { type: 'permission_response'; requestId: string; decision: 'allow' | 'deny' | 'expired'; message: string | null }
   | { type: 'route_response'; correlationId: string; peerLogin: string; reply: string }
-  | { type: 'route_reply'; routeId: string; fromName: string; text: string; ts: string }
+  | { type: 'route_reply'; routeId: string; fromName: string; text: string; ts: string; origin?: 'operator' | 'mcp' }
   | { type: 'probe_response'; correlationId: string; peerLogin: string | null; answer: string | null; done?: boolean }
   | { type: 'list_peers_response'; correlationId: string; peers: { login: string; name: string; online: boolean }[] }
   | { type: 'peers_update'; peers: { login: string; name: string; online: boolean }[] }
