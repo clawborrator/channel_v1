@@ -78,70 +78,56 @@ function readTranscriptMessages(path, tailBytes = DEFAULT_TAIL_BYTES) {
     return [];
   }
 }
-function extractTextBlocksBeforeToolUse(messages, toolUseId) {
-  if (!toolUseId || !Array.isArray(messages)) return [];
-  let targetIdx = -1;
+function findToolUseIndex(messages, toolUseId) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m?.type !== "assistant") continue;
     const content = m.message?.content;
     if (!Array.isArray(content)) continue;
-    if (content.some((c) => c?.type === "tool_use" && c.id === toolUseId)) {
-      targetIdx = i;
-      break;
-    }
+    if (content.some((c) => c?.type === "tool_use" && c.id === toolUseId)) return i;
   }
-  if (targetIdx < 0) return [];
-  const out = [];
-  for (let i = targetIdx - 1; i >= 0; i--) {
+  return -1;
+}
+function walkAssistantBlocksBefore(messages, startIdx, visit) {
+  for (let i = startIdx - 1; i >= 0; i--) {
     const m = messages[i];
     if (m?.type === "user") break;
     if (m?.type !== "assistant") continue;
     const content = m.message?.content;
     if (!Array.isArray(content)) continue;
+    if (visit(content)) return true;
+  }
+  return false;
+}
+function extractTextBlocksBeforeToolUse(messages, toolUseId) {
+  if (!toolUseId || !Array.isArray(messages)) return [];
+  const targetIdx = findToolUseIndex(messages, toolUseId);
+  if (targetIdx < 0) return [];
+  const out = [];
+  walkAssistantBlocksBefore(messages, targetIdx, (content) => {
     for (let j = content.length - 1; j >= 0; j--) {
       const c = content[j];
       if (c?.type === "text" && typeof c.text === "string" && c.text.trim()) {
         out.unshift(c.text);
       }
     }
-  }
+    return false;
+  });
   return out;
 }
 function messageContainsToolUse(messages, toolUseId) {
   if (!toolUseId || !Array.isArray(messages)) return false;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.type !== "assistant") continue;
-    const content = m.message?.content;
-    if (!Array.isArray(content)) continue;
-    if (content.some((c) => c?.type === "tool_use" && c.id === toolUseId)) return true;
-  }
-  return false;
+  return findToolUseIndex(messages, toolUseId) >= 0;
 }
 function hasThinkingBlocksBeforeToolUse(messages, toolUseId) {
   if (!toolUseId || !Array.isArray(messages)) return false;
-  let targetIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.type !== "assistant") continue;
-    const content = m.message?.content;
-    if (!Array.isArray(content)) continue;
-    if (content.some((c) => c?.type === "tool_use" && c.id === toolUseId)) {
-      targetIdx = i;
-      break;
-    }
-  }
+  const targetIdx = findToolUseIndex(messages, toolUseId);
   if (targetIdx < 0) return false;
-  for (let i = targetIdx - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.type === "user") break;
-    if (m?.type !== "assistant") continue;
-    const content = m.message?.content;
-    if (!Array.isArray(content)) continue;
-    if (content.some((c) => c?.type === "thinking")) return true;
-  }
-  return false;
+  return walkAssistantBlocksBefore(
+    messages,
+    targetIdx,
+    (content) => content.some((c) => c?.type === "thinking")
+  );
 }
 function joinTextAfterLastToolUse(content) {
   if (!Array.isArray(content)) return "";
@@ -232,6 +218,11 @@ async function postEvent(sidecar, body, timeoutMs) {
     clearTimeout(timer);
   }
 }
+function hasStringShapedReply(payload) {
+  if (typeof payload.text === "string" && payload.text.trim()) return true;
+  if (typeof payload.response === "string" && payload.response.trim()) return true;
+  return false;
+}
 async function enrichStopAssistantText(payload, hookName2) {
   if (typeof payload.assistant_text === "string" && payload.assistant_text.trim()) return;
   const fromLAM = extractFromLastAssistantMessage(payload.last_assistant_message);
@@ -240,9 +231,7 @@ async function enrichStopAssistantText(payload, hookName2) {
     log.debug("stop: assistant_text from last_assistant_message", { chars: fromLAM.length });
     return;
   }
-  if (typeof payload.text === "string" && payload.text.trim() || typeof payload.response === "string" && payload.response.trim()) {
-    return;
-  }
+  if (hasStringShapedReply(payload)) return;
   const transcriptPath = typeof payload.transcript_path === "string" ? payload.transcript_path : "";
   if (!transcriptPath) {
     log.debug("stop: no transcript_path on payload, no assistant_text recoverable", { hookName: hookName2 });
@@ -257,12 +246,15 @@ async function enrichStopAssistantText(payload, hookName2) {
     log.debug("stop: transcript had no assistant-text block in tail window", { hookName: hookName2, path: transcriptPath });
   }
 }
-async function shipPreToolAssistantText(sidecar, payload) {
+function parsePreToolPayload(payload) {
   const transcriptPath = typeof payload.transcript_path === "string" ? payload.transcript_path : "";
   const toolUseId = String(payload.tool_use_id ?? payload.toolUseId ?? "");
   const toolName = String(payload.tool_name ?? payload.toolName ?? "");
-  if (!transcriptPath || !toolUseId) return;
-  if (TOOLS_SKIPPED_FOR_PRE_TEXT.has(toolName)) return;
+  if (!transcriptPath || !toolUseId) return null;
+  if (TOOLS_SKIPPED_FOR_PRE_TEXT.has(toolName)) return null;
+  return { transcriptPath, toolUseId };
+}
+async function readTranscriptWithRetry(transcriptPath, toolUseId) {
   let messages = readTranscriptMessages(transcriptPath, DEFAULT_TAIL_BYTES);
   let foundTarget = messageContainsToolUse(messages, toolUseId);
   let retries = 0;
@@ -272,16 +264,9 @@ async function shipPreToolAssistantText(sidecar, payload) {
     foundTarget = messageContainsToolUse(messages, toolUseId);
     retries++;
   }
-  const blocks = extractTextBlocksBeforeToolUse(messages, toolUseId);
-  const hasThinking = blocks.length === 0 ? hasThinkingBlocksBeforeToolUse(messages, toolUseId) : false;
-  log.debug("PreToolUse extract", {
-    toolUseId: toolUseId.slice(0, 24),
-    messages: messages.length,
-    targetFound: foundTarget,
-    retries,
-    blocks: blocks.length,
-    placeholder: hasThinking
-  });
+  return { messages, foundTarget, retries };
+}
+async function postPreToolAssistantBlocks(sidecar, blocks, hasThinking, toolUseId) {
   const baseMs = Date.now();
   const tsAt = (i) => new Date(baseMs + i).toISOString();
   if (blocks.length > 0) {
@@ -294,7 +279,9 @@ async function shipPreToolAssistantText(sidecar, payload) {
         ts: tsAt(i)
       }, 800)
     ));
-  } else if (hasThinking) {
+    return;
+  }
+  if (hasThinking) {
     await postEvent(sidecar, {
       sessionId: sidecar.sessionId,
       kind: "chat",
@@ -308,12 +295,24 @@ async function shipPreToolAssistantText(sidecar, payload) {
     }, 800);
   }
 }
-async function runHook(hookName2) {
-  const map = HOOK_TO_EVENT[hookName2];
-  if (!map) {
-    log.warn("unknown hook name; skipping", { hookName: hookName2 });
-    process.exit(0);
-  }
+async function shipPreToolAssistantText(sidecar, payload) {
+  const parsed = parsePreToolPayload(payload);
+  if (!parsed) return;
+  const { transcriptPath, toolUseId } = parsed;
+  const { messages, foundTarget, retries } = await readTranscriptWithRetry(transcriptPath, toolUseId);
+  const blocks = extractTextBlocksBeforeToolUse(messages, toolUseId);
+  const hasThinking = blocks.length === 0 ? hasThinkingBlocksBeforeToolUse(messages, toolUseId) : false;
+  log.debug("PreToolUse extract", {
+    toolUseId: toolUseId.slice(0, 24),
+    messages: messages.length,
+    targetFound: foundTarget,
+    retries,
+    blocks: blocks.length,
+    placeholder: hasThinking
+  });
+  await postPreToolAssistantBlocks(sidecar, blocks, hasThinking, toolUseId);
+}
+async function readAndEchoHookPayload() {
   const stdinRaw = await readStdin();
   if (stdinRaw) process.stdout.write(stdinRaw);
   let payload = {};
@@ -322,28 +321,46 @@ async function runHook(hookName2) {
   } catch {
     payload = { rawStdin: stdinRaw.slice(0, 2e3) };
   }
+  return payload;
+}
+async function runStop(sidecar, payload) {
+  await enrichStopAssistantText(payload, "Stop");
+  const reply = typeof payload.assistant_text === "string" ? payload.assistant_text.trim() : "";
+  if (!reply) return;
+  await postEvent(sidecar, {
+    sessionId: sidecar.sessionId,
+    kind: "chat",
+    type: "reply",
+    payload: { text: reply },
+    ts: (/* @__PURE__ */ new Date()).toISOString()
+  }, 2e3);
+}
+async function dispatchHookEnrichment(hookName2, sidecar, payload) {
+  if (hookName2 === "Stop") {
+    await runStop(sidecar, payload);
+    return;
+  }
+  if (hookName2 === "SubagentStop") {
+    return;
+  }
+  if (hookName2 === "PreToolUse") {
+    await shipPreToolAssistantText(sidecar, payload);
+  }
+}
+async function runHook(hookName2) {
+  const map = HOOK_TO_EVENT[hookName2];
+  if (!map) {
+    log.warn("unknown hook name; skipping", { hookName: hookName2 });
+    process.exit(0);
+  }
+  const payload = await readAndEchoHookPayload();
   const sidecar = findSidecar(process.cwd());
   if (!sidecar) {
     log.warn("hook fired but no sidecar found \u2014 channel must not be running", { cwd: process.cwd() });
     process.exit(0);
   }
   try {
-    if (hookName2 === "Stop") {
-      await enrichStopAssistantText(payload, hookName2);
-      const reply = typeof payload.assistant_text === "string" ? payload.assistant_text.trim() : "";
-      if (reply) {
-        await postEvent(sidecar, {
-          sessionId: sidecar.sessionId,
-          kind: "chat",
-          type: "reply",
-          payload: { text: reply },
-          ts: (/* @__PURE__ */ new Date()).toISOString()
-        }, 2e3);
-      }
-    } else if (hookName2 === "SubagentStop") {
-    } else if (hookName2 === "PreToolUse") {
-      await shipPreToolAssistantText(sidecar, payload);
-    }
+    await dispatchHookEnrichment(hookName2, sidecar, payload);
   } catch (e) {
     log.warn("pre-event enrichment threw", { error: e?.message ?? String(e), hookName: hookName2 });
   }
