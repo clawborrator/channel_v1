@@ -125,7 +125,8 @@ for the dispatcher-pattern setup.
 ## Hook coverage
 
 Maps each Claude Code hook to a hub event. The hook script is
-`dist-hook/clawborrator-tail.mjs`; install via `claw session init`.
+`dist-hook/clawborrator-tail.mjs`; auto-installed on first MCP
+startup (no separate install step).
 
 | Hook | Hub event | Notes |
 |---|---|---|
@@ -135,24 +136,20 @@ Maps each Claude Code hook to a hub event. The hook script is
 | `PostToolUseFailure` | `tail/PostToolUseFailure` | |
 | `Stop` | `tail/Stop` (+ `chat/reply` if assistant_text present) | Turn-end signal. |
 | `Notification` | `tail/Notification` | CC user notifications (idle / permission). |
-| `SessionStart` / `SessionEnd` | `tail/SessionStart` / `tail/SessionEnd` | |
 | `TaskCreated` / `TaskCompleted` | `tail/TaskCreated` / `tail/TaskCompleted` | Carries `task_id`, `task_subject`, `task_description`. |
 | `SubagentStart` / `SubagentStop` | `tail/SubagentStart` / `tail/SubagentStop` | SubagentStop carries `last_assistant_message` recap. |
+
+`SessionStart` / `SessionEnd` are intentionally **not** hooked by
+this MCP. The hook spawn had a fundamental race — the sidecar
+isn't written yet at SessionStart, and is already gone by SessionEnd
+— so lifecycle is now emitted server-side from the `/channel` WS
+welcome / close transitions (`hub_v1/server/src/ws/channel.ts`).
+Hub-authoritative, captures actual channel liveness, no hook timing
+involved.
 
 The tail reads the CC transcript file directly to enrich `PreToolUse`
 with the assistant's pre-reply text (which CC doesn't put on the
 hook payload directly). See `transcript.ts` for the walker.
-
----
-
-## Phases (all shipped)
-
-- **Phase A** ✓ — connect / register / heartbeat / reconnect
-- **Phase B** ✓ — hooks + event forwarding via sidecar
-- **Phase C** ✓ — bidirectional permission relay (channel → hub → operator → back)
-- **Phase D** ✓ — MCP tools (above)
-- **Phase E** ✓ — public-agent dispatch (`dispatch_to_agent`, `list_agents`); 15-min timeouts; cyclomatic-complexity refactor
-- **Phase F** ✓ — streaming `reply_chunk` (incremental output), `read_file` / `download_to_path` for cross-session file exchange
 
 ---
 
