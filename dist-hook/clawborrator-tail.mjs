@@ -37,15 +37,7 @@ function readSidecar(cwd) {
   }
 }
 function findSidecar(start) {
-  let dir = resolve(start);
-  for (let i = 0; i < 32; i++) {
-    const found = readSidecar(dir);
-    if (found) return found;
-    const parent = resolve(dir, "..");
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
+  return readSidecar(start);
 }
 
 // src/transcript.ts

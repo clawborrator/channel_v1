@@ -57,16 +57,16 @@ export function readSidecar(cwd: string): SidecarPayload | null {
   }
 }
 
-// Walk upward from `start` looking for a sidecar. Hooks may run from
-// a deeper subdirectory than where the channel registered.
+// Read the sidecar at `start` ONLY. The earlier walk-up was a
+// misfeature: when a clawborrator-less CC ran inside a parent
+// project that DID have a sidecar (e.g. an orchard subagent under
+// a clauderemote checkout), its hooks attributed every event to
+// the parent's sessionId. The fix: if there's no sidecar at the
+// hook's exact cwd, drop the event silently. Hooks fired from
+// nested subdirectories of an actual clawborrator project should
+// be the rare case; if it surfaces in practice, re-add a bounded
+// walk anchored on a clawborrator-specific marker file (NOT a
+// generic .claude/ presence).
 export function findSidecar(start: string): SidecarPayload | null {
-  let dir = resolve(start);
-  for (let i = 0; i < 32; i++) {
-    const found = readSidecar(dir);
-    if (found) return found;
-    const parent = resolve(dir, '..');
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
+  return readSidecar(start);
 }
