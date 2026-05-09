@@ -40,6 +40,26 @@ const HOOK_NAMES = [
   'Notification',
 ] as const;
 
+// CC's hook spec: `matcher` is matched against tool name on
+// PreToolUse / PostToolUse, and is silently SUPPRESSING on the
+// canonical non-tool events (Stop / SubagentStop / UserPromptSubmit
+// / Notification / SessionStart / SessionEnd / PreCompact) — putting
+// a `matcher` field on those rows makes the hook silently never
+// fire. We omit it for those, keep `matcher: ".*"` for tool events,
+// and default unknown / custom names to "wants matcher" so the
+// non-canonical slots we install (PostToolUseFailure / TaskCreated /
+// TaskCompleted / SubagentStart) keep firing — empirically those
+// accept matcher as a no-op in our CC version.
+const NON_MATCHER_EVENTS = new Set<string>([
+  'Stop',
+  'SubagentStop',
+  'UserPromptSubmit',
+  'Notification',
+  'SessionStart',
+  'SessionEnd',
+  'PreCompact',
+]);
+
 const TAG = 'clawborrator-hook';
 
 interface ClaudeHook {
@@ -144,18 +164,21 @@ function materializeHookEntry(
   entry.hooks.push({ type: 'command', command: desiredCmd });
 }
 
-// Per-event update: ensures the catch-all `.* matcher` row exists,
-// then resolves + applies the action. Returns the action so the
-// caller can tally counts.
+// Per-event update: finds-or-creates the right-shape row for the
+// event (matcher: '.*' for tool events, no matcher field otherwise),
+// then resolves + applies the action.
 function reconcileHookEvent(
   s: SettingsShape,
   name: string,
   hookFile: string,
 ): 'add' | 'refresh' | 'noop' {
   const arr: ClaudeHook[] = (s.hooks![name] ??= []);
-  let entry: ClaudeHook | undefined = arr.find((e: ClaudeHook) => (e.matcher ?? '.*') === '.*');
+  const wantsMatcher = !NON_MATCHER_EVENTS.has(name);
+  let entry: ClaudeHook | undefined = arr.find((e: ClaudeHook) =>
+    wantsMatcher ? (e.matcher ?? '.*') === '.*' : e.matcher === undefined,
+  );
   if (!entry) {
-    entry = { matcher: '.*', hooks: [] };
+    entry = wantsMatcher ? { matcher: '.*', hooks: [] } : { hooks: [] };
     arr.push(entry);
   }
   const desiredCmd = hookCommand(name, hookFile);

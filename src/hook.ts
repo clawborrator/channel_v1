@@ -17,8 +17,24 @@
 //   6. POST /api/channel/event with the channel token from the sidecar
 //   7. Echo stdin to stdout so Claude's hook chain stays intact
 
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { findSidecar, type SidecarPayload } from './sidecar.js';
 import { log } from './log.js';
+
+// Resolve the project root from THIS file's installed location, not
+// from process.cwd(). The hook is installed at
+// <project>/.claude/hooks/clawborrator-tail.mjs, and CC's hook
+// subsystem inherits the user's persistent shell cwd — meaning
+// `process.cwd()` shifts the moment the operator runs `cd <subdir>`
+// in any Bash tool call. After that, every hook that walked off
+// `process.cwd()` silently failed to find the sidecar and exited
+// without posting. Anchoring on `import.meta.url` is stable: the
+// installed .mjs path doesn't move during a session.
+function projectRootFromHookFile(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve(here, '..', '..');
+}
 import {
   readTranscriptMessages,
   messageContainsToolUse,
@@ -333,9 +349,10 @@ export async function runHook(hookName: string): Promise<void> {
 
   const payload = await readAndEchoHookPayload();
 
-  const sidecar: SidecarPayload | null = findSidecar(process.cwd());
+  const projectRoot = projectRootFromHookFile();
+  const sidecar: SidecarPayload | null = findSidecar(projectRoot);
   if (!sidecar) {
-    log.warn('hook fired but no sidecar found — channel must not be running', { cwd: process.cwd() });
+    log.warn('hook fired but no sidecar found — channel must not be running', { projectRoot, cwd: process.cwd() });
     process.exit(0);
   }
 

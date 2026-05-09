@@ -44,6 +44,7 @@ import type { ChannelClient } from '../ws-client.js';
 const ASK_TIMEOUT_MS   = 900_000;
 const PROBE_TIMEOUT_MS = 30_000;
 const LIST_TIMEOUT_MS  = 5_000;
+const ASK_QUESTION_TIMEOUT_MS = 900_000;  // 15min — same cap as route ask mode
 const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
 const MAX_READ_INLINE_BYTES = 1 * 1024 * 1024;
 
@@ -170,6 +171,46 @@ export const TOOL_DEFINITIONS = [
       properties: {
         fileId: { type: 'integer', minimum: 1, description: 'The fileId to download (typically from a routed prompt mentioning fileId=N).' },
         path:   { type: 'string',  description: 'Relative path under cwd, e.g. "tmp/doc.pdf". Parent dirs are auto-created. Target must not already exist.' },
+      },
+    },
+  },
+  {
+    name: 'ask_question',
+    description: 'Ask the REMOTE operator a multiple-choice question through orchard-chat — does NOT block the local TUI. Prefer this over the built-in `AskUserQuestion` tool whenever the session is being driven remotely (operator messages arrive as <channel source="clawborrator"> tags), since `AskUserQuestion` opens a synchronous picker in the local terminal that no one is watching. Same input shape as AskUserQuestion: a `questions[]` array, each with `question`, optional `header`, optional `multiSelect`, and 2-4 `options[]` (each `{label, description?}`). Renders as a clickable card on the operator\'s orchard-chat. Blocks (max 15min) until the operator picks an option; returns the chosen label as the tool result. If the operator types a free-form chat message INSTEAD of clicking, that message returns the user to a normal turn — don\'t treat it as the answer; it\'s a redirect. Picking from a multi-question array fires once per question.',
+    inputSchema: {
+      type:        'object',
+      additionalProperties: false,
+      required:    ['questions'],
+      properties: {
+        questions: {
+          type:     'array',
+          minItems: 1,
+          maxItems: 4,
+          items: {
+            type:        'object',
+            additionalProperties: false,
+            required:    ['question', 'options'],
+            properties: {
+              question:    { type: 'string', description: 'The full question text shown to the operator.' },
+              header:      { type: 'string', description: 'Short label (≤ 12 chars) shown as a chip next to the question.' },
+              multiSelect: { type: 'boolean', description: 'When true, multiple options can be picked. Default false.' },
+              options: {
+                type:     'array',
+                minItems: 2,
+                maxItems: 4,
+                items: {
+                  type:        'object',
+                  additionalProperties: false,
+                  required:    ['label'],
+                  properties: {
+                    label:       { type: 'string', description: 'Button label (1-5 words).' },
+                    description: { type: 'string', description: 'One-line context shown under the button.' },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     },
   },
@@ -650,8 +691,96 @@ export async function callTool(
     case 'read_file':         return callReadFile(ctx, args);
     case 'download_to_path':  return callDownloadToPath(ctx, args);
     case 'attach_file':       return callAttachFile(ctx, args);
+    case 'ask_question':      return callAskQuestion(ctx, args);
     default:                  return errorContent(`unknown tool: ${name}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// ask_question — non-blocking remote multiple-choice replacement for the
+// built-in AskUserQuestion tool. Emits a tail event with eventType
+// 'AskUserQuestion' so orchard-chat renders the same question card; then
+// subscribes for the next inbound chat-prompt whose text matches one of
+// the option labels (the operator clicks → orchard-chat sends the chosen
+// label as a chat/prompt). On match: emit a follow-up tail event with the
+// `answers` field populated (so the card flips to answered state across
+// all viewers, including page reloads), and return the chosen label as
+// the tool result. Local CC TUI is NOT blocked by any of this.
+// ---------------------------------------------------------------------------
+async function callAskQuestion(ctx: CallContext, args: Record<string, unknown>): Promise<ToolResult> {
+  const questions = Array.isArray(args.questions) ? args.questions as any[] : [];
+  if (questions.length === 0) return errorContent('questions[] is required and must be non-empty');
+
+  // Collect every label across every question. The first inbound prompt
+  // whose trimmed text matches one of these wins. (Multi-question call
+  // returns only the first matched answer in this v1; expand later if
+  // needed.)
+  const labelByQuestion = new Map<string, Set<string>>();
+  for (const q of questions) {
+    const set = new Set<string>();
+    for (const opt of (Array.isArray(q?.options) ? q.options : [])) {
+      const lbl = String(opt?.label ?? '').trim();
+      if (lbl) set.add(lbl);
+    }
+    labelByQuestion.set(String(q?.question ?? ''), set);
+  }
+  const allLabels = new Set<string>();
+  for (const set of labelByQuestion.values()) for (const l of set) allLabels.add(l);
+  if (allLabels.size === 0) return errorContent('no option labels found across the questions');
+
+  const questionId = randomUUID();
+  const ts = () => new Date().toISOString();
+
+  // Emit the question card. Mirrors a PreToolUse-AskUserQuestion shape so
+  // orchard-chat's existing tail-question coalescer picks it up unchanged.
+  ctx.client.send({
+    type:      'tail_event',
+    eventType: 'AskUserQuestion',
+    payload: {
+      tool_name:   'AskUserQuestion',
+      tool_use_id: questionId,
+      tool_input:  { questions },
+      // Marks this as a clawborrator-initiated question rather than a
+      // CC built-in — useful for orchard-chat / debugging filters.
+      source:      'mcp_ask_question',
+    },
+    ts: ts(),
+  });
+
+  // Wait for a matching click. The matcher trims for tolerance against
+  // any leading/trailing whitespace orchard-chat may add.
+  let answer;
+  try {
+    answer = await ctx.client.subscribePrompt(
+      (text) => allLabels.has(text.trim()),
+      ASK_QUESTION_TIMEOUT_MS,
+    );
+  } catch (e: any) {
+    return errorContent(`ask_question timed out after ${Math.round(ASK_QUESTION_TIMEOUT_MS / 1000)}s waiting for an option click`);
+  }
+
+  // Emit the answered tail event so the card flips state for every
+  // viewer (and survives page reloads, since the row is upgraded on
+  // re-coalesce from the events log).
+  const chosen = answer.text.trim();
+  const answers: Record<string, string> = {};
+  for (const [qText, labels] of labelByQuestion.entries()) {
+    if (labels.has(chosen)) answers[qText] = chosen;
+  }
+  ctx.client.send({
+    type:      'tail_event',
+    eventType: 'AskUserQuestion',
+    payload: {
+      tool_name:   'AskUserQuestion',
+      tool_use_id: questionId,
+      tool_input:  { questions },
+      answers,
+      source:      'mcp_ask_question',
+    },
+    ts: ts(),
+  });
+
+  return textContent(`Operator answered: ${chosen}`);
 }
 
 function isTextMime(mime: string): boolean {

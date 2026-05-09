@@ -24,7 +24,7 @@ import type { ChannelConfig } from './config.js';
 type Outbound =
   | { type: 'register'; host: string; cwd: string; osUser: string | null; pid: number; channelVersion: string; sessionId: string | null }
   | { type: 'chat_event'; eventType: 'prompt' | 'reply' | 'reply_chunk'; payload: Record<string, unknown>; ts: string }
-  | { type: 'tail_event'; eventType: 'PreToolUse' | 'PostToolUse' | 'Stop' | 'Notification' | 'UserPromptSubmit'; payload: Record<string, unknown>; ts: string }
+  | { type: 'tail_event'; eventType: string; payload: Record<string, unknown>; ts: string }
   | { type: 'permission_request'; requestId: string; tool: string; inputPreview: string; ts: string }
   | { type: 'route_request'; correlationId: string; peer: string; prompt: string; mode: 'ask' | 'tell' }
   | { type: 'probe_request'; correlationId: string; peers: string[] | null; prompt: string }
@@ -76,6 +76,19 @@ interface PendingProbe {
 }
 type Pending = PendingSingle | PendingProbe;
 
+// Pending prompt subscription used by ask_question. Holds a
+// per-call matcher; onPromptMsg walks subscribers in registration
+// order and the FIRST matcher that returns true claims the prompt
+// (the prompt is then NOT fanned out to handlers.onPrompt — i.e.
+// the assistant doesn't see it as a turn input, the tool returns
+// the chosen label as its result instead). Misses fall through to
+// handlers.onPrompt unchanged.
+interface PromptSubscriber {
+  match:   (text: string, chatId: string) => boolean;
+  resolve: (m: { chatId: string; text: string }) => void;
+  timer:   NodeJS.Timeout;
+}
+
 export class ChannelClient {
   private ws: WebSocket | null = null;
   private attempt = 0;
@@ -83,6 +96,7 @@ export class ChannelClient {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private currentSessionId: string | null;
   private pending = new Map<string /* correlationId */, Pending>();
+  private promptSubscribers: PromptSubscriber[] = [];
 
   constructor(
     private readonly config: ChannelConfig,
@@ -148,6 +162,31 @@ export class ChannelClient {
       }, timeoutMs);
       this.pending.set(msg.correlationId, { kind: 'single', resolve, reject, timer });
       this.send(msg);
+    });
+  }
+
+  /** Subscribe for the next inbound `prompt` message whose text +
+   *  chatId pass the matcher. Used by `ask_question` to wait for the
+   *  remote operator's clicked answer (the click sends back a
+   *  chat/prompt with the chosen option label). On match, the
+   *  prompt is consumed by the subscriber and NOT delivered to the
+   *  default onPrompt handler — the assistant gets the answer as
+   *  the tool's return value instead of as a separate user-turn
+   *  input. Resolves on match; rejects on timeout. */
+  subscribePrompt(
+    match:     (text: string, chatId: string) => boolean,
+    timeoutMs: number,
+  ): Promise<{ chatId: string; text: string }> {
+    return new Promise((resolve, reject) => {
+      const sub: PromptSubscriber = {
+        match,
+        resolve,
+        timer: setTimeout(() => {
+          this.promptSubscribers = this.promptSubscribers.filter((s) => s !== sub);
+          reject(new Error('subscribePrompt timed out'));
+        }, timeoutMs),
+      };
+      this.promptSubscribers.push(sub);
     });
   }
 
@@ -220,6 +259,19 @@ export class ChannelClient {
   }
 
   private onPromptMsg(msg: Extract<Inbound, { type: 'prompt' }>): void {
+    // Subscriber-claim path: ask_question registers a matcher; the
+    // first matching prompt is consumed there and NOT forwarded to
+    // the default handler. Walk in registration order and stop at
+    // the first hit.
+    for (let i = 0; i < this.promptSubscribers.length; i++) {
+      const sub = this.promptSubscribers[i];
+      if (sub.match(msg.text, msg.chatId)) {
+        clearTimeout(sub.timer);
+        this.promptSubscribers.splice(i, 1);
+        sub.resolve({ chatId: msg.chatId, text: msg.text });
+        return;
+      }
+    }
     this.handlers.onPrompt?.(msg);
   }
 

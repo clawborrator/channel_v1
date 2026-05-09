@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// src/hook.ts
+import { dirname, resolve as resolve2 } from "node:path";
+import { fileURLToPath } from "node:url";
+
 // src/sidecar.ts
 import { resolve } from "node:path";
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, chmodSync, existsSync } from "node:fs";
@@ -156,6 +160,10 @@ function extractFinalAnswerFromTranscript(path, tailBytes = DEFAULT_TAIL_BYTES) 
 }
 
 // src/hook.ts
+function projectRootFromHookFile() {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve2(here, "..", "..");
+}
 var HOOK_TO_EVENT = {
   UserPromptSubmit: { kind: "chat", type: "prompt" },
   PreToolUse: { kind: "tail", type: "PreToolUse" },
@@ -344,9 +352,10 @@ async function runHook(hookName2) {
     process.exit(0);
   }
   const payload = await readAndEchoHookPayload();
-  const sidecar = findSidecar(process.cwd());
+  const projectRoot = projectRootFromHookFile();
+  const sidecar = findSidecar(projectRoot);
   if (!sidecar) {
-    log.warn("hook fired but no sidecar found \u2014 channel must not be running", { cwd: process.cwd() });
+    log.warn("hook fired but no sidecar found \u2014 channel must not be running", { projectRoot, cwd: process.cwd() });
     process.exit(0);
   }
   try {
