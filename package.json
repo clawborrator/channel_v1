@@ -19,8 +19,7 @@
     "websocket",
     "remote",
     "ai",
-    "agent",
-    "hub-v1"
+    "agent"
   ],
   "main": "dist/index.js",
   "bin": {
