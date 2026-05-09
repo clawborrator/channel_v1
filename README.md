@@ -2,14 +2,15 @@
 
 MCP server that connects each running Claude Code instance to a
 [`hub_v1`](https://github.com/clawborrator/hub_v1) over WebSocket.
-Companion to the hub. Designed to be invoked by Claude Code via
-`.mcp.json`; runs as both a long-lived stdio MCP server AND a
-short-lived hook spawn (selected by the `--hook=<HookName>` CLI flag).
+Designed to be invoked by Claude Code via `.mcp.json`; runs as both
+a long-lived stdio MCP server AND a short-lived hook spawn (selected
+by the `--hook=<HookName>` CLI flag).
 
-> **Status: dev-mode-only.** Connect to a local hub at `ws://localhost:8787`.
-> Production deployment is a future concern.
->
-> Design context: [`hub/design/IMPL-PLAN-1-CHANNEL-V1-FRESH-START.md`](https://github.com/clawborrator/hub/blob/main/design/IMPL-PLAN-1-CHANNEL-V1-FRESH-START.md).
+Published as [`clawborrator-mcp`](https://www.npmjs.com/package/clawborrator-mcp)
+on npm.
+
+> **Status: production hub at [`next.clawborrator.com`](https://next.clawborrator.com).**
+> Local dev uses `ws://localhost:8787`. Both supported.
 
 ---
 
@@ -24,7 +25,7 @@ Set in your project's `.mcp.json`:
       "command": "npx",
       "args": ["-y", "clawborrator-mcp"],
       "env": {
-        "CLAWBORRATOR_HUB_URL": "ws://localhost:8787",
+        "CLAWBORRATOR_HUB_URL": "wss://next.clawborrator.com",
         "CLAWBORRATOR_TOKEN":   "ck_live_…"
       }
     }
@@ -56,7 +57,8 @@ claw token mint --kind=channel --name=mbp --mcp-snippet
 4. Writes `<cwd>/.claude/clawborrator.session.json` (mode 0600) so per-event hook spawns can find the active session.
 5. Maintains the WS with heartbeat ping/pong; reconnects with exponential backoff (1s/2s/5s/15s/30s/60s).
 6. Listens for hub-side messages: `prompt` (cross-session route), `permission_response`, `peers_update`, `bye`, `error`.
-7. On clean shutdown (SIGINT/SIGTERM/exit), deletes the sidecar.
+7. Dispatches MCP tool calls (see below) over the same WS.
+8. On clean shutdown (SIGINT/SIGTERM/exit), deletes the sidecar.
 
 **Short-lived hook path** (`--hook=<HookName>` flag):
 1. Reads JSON payload from stdin (Claude Code's hook protocol).
@@ -70,29 +72,79 @@ Hooks are installed with `claw session init` from inside a project — see hub_v
 
 ---
 
-## Tools exposed to Claude
+## MCP tools exposed to Claude
 
-v1 ships an empty MCP tool list. The hooks-based event firehose
-covers chat + tail event capture without any Claude-side tool calls.
+Routed: targets a peer (your own session or another operator's session you have a share on) by routingName.
 
-Phase D adds these:
-- `reply({ chat_id, text })` — Claude posts a tagged final reply
-- `list_peers()` — Claude discovers other operator sessions
-- `route_to_peer({ peer, prompt, mode })` — Claude routes a question
-- `probe_peers({ prompt, peers? })` — Claude fan-out probes
+| Tool | Purpose |
+|---|---|
+| `reply({ chat_id, text })` | Post a tagged final reply for a routed prompt (closes the round-trip when the source session is blocking on a reply). |
+| `reply_chunk({ chat_id, text, done })` | Stream a reply progressively — the operator sees text growing live; close with `done:true`. Same correlation as `reply`. |
+| `list_peers()` | Discover other CC sessions the operator has access to (own sessions + shared ones). Refused on agents published as `isolated`. |
+| `route_to_peer({ peer, prompt, mode })` | Send one prompt to one peer. `mode: 'ask'` blocks for the reply; `mode: 'tell'` is fire-and-forget. |
+| `probe_peers({ prompt, peers? })` | Fan out the same short question to many peers in parallel for discovery. |
+| `await_routed_prompt({ maxWaitMs })` | Dequeue an inbound routed prompt for THIS session — used by agents that service requests from other sessions. |
 
-For now, operators initiate routing via `claw route` / `claw probe`.
+Cross-tenant — public agents owned by other operators:
+
+| Tool | Purpose |
+|---|---|
+| `list_agents()` | Discover public agents on the hub. Returns handle, name, tagline, online, mine, isolated flags. |
+| `dispatch_to_agent({ handle, prompt, mode })` | Invoke a published agent by `<owner>/<slug>` handle. `ask` mode waits up to 15 min for the reply; `tell` mode is fire-and-forget. |
+
+File exchange:
+
+| Tool | Purpose |
+|---|---|
+| `attach_file({ path, targetSessionId? })` | Upload a file from disk to the session (or to a peer's session you have a share on). Returns `fileId`. |
+| `read_file({ fileId })` | Fetch a session-attached file inline (text-mime; under 1 MB). Reply-clone makes peer-uploaded files visible to the recipient. |
+| `download_to_path({ fileId, path })` | Fetch a larger or binary file to disk. Returns the absolute path written. |
+
+The hub correlates `reply` / `reply_chunk` to their originating
+`route_to_peer` / `dispatch_to_agent` by chatId; the source session's
+CC unblocks when the matching reply lands. 15-minute timeout caps —
+see `hub_v1/server/src/services/agents.ts` and `services/op-routes.ts`.
+
+For `await_routed_prompt` to actually fire — i.e., for an agent to
+service incoming requests — its CLAUDE.md needs a line telling Claude
+to call it at the start of each turn. Without that note, Claude
+won't know to consult the inbox. See
+[`hub_v1/docs/3-AGENT-SETUP.md`](https://github.com/clawborrator/hub_v1/blob/main/docs/3-AGENT-SETUP.md)
+for the dispatcher-pattern setup.
 
 ---
 
-## Phases
+## Hook coverage
 
-- **Phase A** (✓): connect / register / heartbeat / reconnect
-- **Phase B** (✓): hooks + event forwarding via sidecar
-- **Phase C** (✓): bidirectional permission relay protocol (channel
-  → hub → operator → back). Hook IPC for actually delivering decisions
-  into a blocked PreToolUse hook is upcoming.
-- **Phase D**: MCP tools (above)
+Maps each Claude Code hook to a hub event. The hook script is
+`dist-hook/clawborrator-tail.mjs`; install via `claw session init`.
+
+| Hook | Hub event | Notes |
+|---|---|---|
+| `UserPromptSubmit` | `chat/prompt` (source='cli') | Operator typing into the local CC terminal. |
+| `PreToolUse` | `tail/PreToolUse` (+ `chat/assistant_text` per text block from the transcript) | The tail captures pre-reply narration too. |
+| `PostToolUse` | `tail/PostToolUse` | |
+| `PostToolUseFailure` | `tail/PostToolUseFailure` | |
+| `Stop` | `tail/Stop` (+ `chat/reply` if assistant_text present) | Turn-end signal. |
+| `Notification` | `tail/Notification` | CC user notifications (idle / permission). |
+| `SessionStart` / `SessionEnd` | `tail/SessionStart` / `tail/SessionEnd` | |
+| `TaskCreated` / `TaskCompleted` | `tail/TaskCreated` / `tail/TaskCompleted` | Carries `task_id`, `task_subject`, `task_description`. |
+| `SubagentStart` / `SubagentStop` | `tail/SubagentStart` / `tail/SubagentStop` | SubagentStop carries `last_assistant_message` recap. |
+
+The tail reads the CC transcript file directly to enrich `PreToolUse`
+with the assistant's pre-reply text (which CC doesn't put on the
+hook payload directly). See `transcript.ts` for the walker.
+
+---
+
+## Phases (all shipped)
+
+- **Phase A** ✓ — connect / register / heartbeat / reconnect
+- **Phase B** ✓ — hooks + event forwarding via sidecar
+- **Phase C** ✓ — bidirectional permission relay (channel → hub → operator → back)
+- **Phase D** ✓ — MCP tools (above)
+- **Phase E** ✓ — public-agent dispatch (`dispatch_to_agent`, `list_agents`); 15-min timeouts; cyclomatic-complexity refactor
+- **Phase F** ✓ — streaming `reply_chunk` (incremental output), `read_file` / `download_to_path` for cross-session file exchange
 
 ---
 
@@ -107,4 +159,16 @@ npm link
 clawborrator-mcp --hook=PreToolUse < /dev/null   # exits cleanly with no sidecar
 ```
 
-When `claude` runs in a folder whose `.mcp.json` references `clawborrator-mcp`, npm/npx resolves it to your linked build.
+When `claude` runs in a folder whose `.mcp.json` references
+`clawborrator-mcp`, npm/npx resolves it to your linked build.
+
+To publish a new release:
+
+```bash
+npm version patch                # bumps package.json + creates git tag
+npm publish
+git push --follow-tags
+```
+
+The CLI's `claw token mint --mcp-snippet` autogenerates an `.mcp.json`
+snippet pointing at the published version.
