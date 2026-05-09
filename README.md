@@ -1,13 +1,17 @@
 # clawborrator-mcp (channel_v1)
 
 MCP server that connects each running Claude Code instance to a
-[`hub_v1`](https://github.com/clawborrator/hub_v1) over WebSocket.
-Designed to be invoked by Claude Code via `.mcp.json`; runs as both
-a long-lived stdio MCP server AND a short-lived hook spawn (selected
-by the `--hook=<HookName>` CLI flag).
+clawborrator [`hub`](https://github.com/clawborrator/hub_v1) over
+WebSocket. Designed to be invoked by Claude Code via `.mcp.json`;
+runs as both a long-lived stdio MCP server AND a short-lived hook
+spawn (selected by the `--hook=<HookName>` CLI flag).
 
 Published as [`clawborrator-mcp`](https://www.npmjs.com/package/clawborrator-mcp)
-on npm.
+on npm. Sibling repos:
+
+- [`hub_v1`](https://github.com/clawborrator/hub_v1) — the hub server (REST + WS), deployed at https://next.clawborrator.com
+- [`cli_v1`](https://github.com/clawborrator/cli_v1) — `claw`, the operator CLI ([`clawborrator-cli`](https://www.npmjs.com/package/clawborrator-cli) on npm)
+- [`desktop_v1`](https://github.com/clawborrator/desktop_v1) — `clawborrator-supervisor`, the desktop daemon for managed CC sessions
 
 > **Status: production hub at [`next.clawborrator.com`](https://next.clawborrator.com).**
 > Local dev uses `ws://localhost:8787`. Both supported.
@@ -40,11 +44,17 @@ Set in your project's `.mcp.json`:
 | `CLAWBORRATOR_REUSE_SESSION_ID` | no | Opt-in: reconnect rebinds to a known session id rather than creating a fresh one |
 | `CLAWBORRATOR_LOG_LEVEL` | no | `debug`, `info`, `warn`, `error`; default `info` |
 
-Get the snippet pre-filled with the right URL + token via:
+Get the snippet pre-filled with the right URL + token via the
+[`clawborrator-cli`](https://www.npmjs.com/package/clawborrator-cli):
 
 ```bash
-claw token mint --kind=channel --name=mbp --mcp-snippet
+npx clawborrator-cli token mint --kind=channel --name=mbp --mcp-snippet --out .mcp.json
 ```
+
+If you're running the [desktop daemon](https://github.com/clawborrator/desktop_v1)
+(`clawborrator-supervisor`), it mints channel tokens server-side
+when it spawns managed Claude Code sessions for you — the `.mcp.json`
+ends up in the spawned project automatically.
 
 ---
 
@@ -68,7 +78,9 @@ claw token mint --kind=channel --name=mbp --mcp-snippet
 5. Echoes stdin to stdout so Claude's hook chain stays intact.
 6. Exits cleanly even if the hub is unreachable — never breaks the operator's actual Claude flow.
 
-Hooks are installed with `claw session init` from inside a project — see hub_v1 README.
+Hooks are auto-installed on first MCP startup: `clawborrator-mcp` reconciles
+`.claude/settings.json` to add (or refresh) the entries that point at
+`dist-hook/clawborrator-tail.mjs`. No separate install step.
 
 ---
 
