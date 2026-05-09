@@ -21,9 +21,13 @@ import { log } from './log.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// SessionStart / SessionEnd intentionally NOT here — channel_v1's
+// hook had a fundamental race (sidecar not yet written on startup,
+// sidecar already deleted on shutdown). Lifecycle is now emitted
+// server-side from the /channel WS welcome/close transitions in
+// hub_v1/server/src/ws/channel.ts, which is reliable and captures
+// the channel's actual liveness without depending on hook timing.
 const HOOK_NAMES = [
-  'SessionStart',
-  'SessionEnd',
   'UserPromptSubmit',
   'PreToolUse',
   'PostToolUse',
@@ -208,6 +212,29 @@ export function installHooks(cwd: string): {
     else if (action === 'refresh') refreshed++;
     else alreadyOk++;
   }
+
+  // Sweep our (#clawborrator-hook) entries from event names that are
+  // NO LONGER in HOOK_NAMES — currently SessionStart / SessionEnd,
+  // which we now emit server-side from /channel WS lifecycle. This
+  // is what makes earlier installs converge after an upgrade.
+  // Don't touch entries that aren't ours (the operator may have
+  // their own hooks in those slots).
+  let removed = 0;
+  const desiredSet = new Set<string>(HOOK_NAMES);
+  for (const eventName of Object.keys(s.hooks)) {
+    if (desiredSet.has(eventName)) continue;
+    const entries = s.hooks[eventName];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const before = entry.hooks.length;
+      entry.hooks = entry.hooks.filter((h) => !isOurHook(h));
+      if (entry.hooks.length < before) removed += before - entry.hooks.length;
+    }
+    // Drop now-empty matcher rows so we don't leave hollow shells.
+    s.hooks[eventName] = entries.filter((e) => e.hooks.length > 0);
+    if (s.hooks[eventName].length === 0) delete s.hooks[eventName];
+  }
+  if (removed > 0) refreshed += removed;
 
   // 3) Write only if the serialized form changed.
   const newText = JSON.stringify(s, null, 2) + '\n';

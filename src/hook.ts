@@ -32,6 +32,13 @@ import {
 // Mirrors the install-hooks set from the old clawborrator-channel
 // package so the remote viewer has the same coverage of Claude Code's
 // hook surface.
+// SessionStart / SessionEnd are deliberately ABSENT here — they're
+// emitted server-side by hub_v1/server/src/ws/channel.ts on the
+// channel-WS welcome/close transitions instead. The hook-side
+// equivalents had a fundamental race (sidecar didn't exist yet on
+// startup; sidecar already deleted on shutdown) plus duplication
+// against the channel-emitted ones on every claude --resume. Channel-
+// emitted is the single source of truth for "session is alive."
 const HOOK_TO_EVENT: Record<string, { kind: 'chat' | 'tail'; type: string }> = {
   UserPromptSubmit:    { kind: 'chat', type: 'prompt' },
   PreToolUse:          { kind: 'tail', type: 'PreToolUse' },
@@ -39,8 +46,6 @@ const HOOK_TO_EVENT: Record<string, { kind: 'chat' | 'tail'; type: string }> = {
   PostToolUseFailure:  { kind: 'tail', type: 'PostToolUseFailure' },
   Stop:                { kind: 'tail', type: 'Stop' },
   Notification:        { kind: 'tail', type: 'Notification' },
-  SessionStart:        { kind: 'tail', type: 'SessionStart' },
-  SessionEnd:          { kind: 'tail', type: 'SessionEnd' },
   TaskCreated:         { kind: 'tail', type: 'TaskCreated' },
   SubagentStart:       { kind: 'tail', type: 'SubagentStart' },
   SubagentStop:        { kind: 'tail', type: 'SubagentStop' },

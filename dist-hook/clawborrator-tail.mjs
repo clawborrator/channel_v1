@@ -163,8 +163,6 @@ var HOOK_TO_EVENT = {
   PostToolUseFailure: { kind: "tail", type: "PostToolUseFailure" },
   Stop: { kind: "tail", type: "Stop" },
   Notification: { kind: "tail", type: "Notification" },
-  SessionStart: { kind: "tail", type: "SessionStart" },
-  SessionEnd: { kind: "tail", type: "SessionEnd" },
   TaskCreated: { kind: "tail", type: "TaskCreated" },
   SubagentStart: { kind: "tail", type: "SubagentStart" },
   SubagentStop: { kind: "tail", type: "SubagentStop" },
