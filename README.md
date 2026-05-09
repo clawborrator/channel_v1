@@ -7,11 +7,7 @@ runs as both a long-lived stdio MCP server AND a short-lived hook
 spawn (selected by the `--hook=<HookName>` CLI flag).
 
 Published as [`clawborrator-mcp`](https://www.npmjs.com/package/clawborrator-mcp)
-on npm. Sibling repos:
-
-- [`hub_v1`](https://github.com/clawborrator/hub_v1) — the hub server (REST + WS), deployed at https://next.clawborrator.com
-- [`cli_v1`](https://github.com/clawborrator/cli_v1) — `claw`, the operator CLI ([`clawborrator-cli`](https://www.npmjs.com/package/clawborrator-cli) on npm)
-- [`desktop_v1`](https://github.com/clawborrator/desktop_v1) — `clawborrator-supervisor`, the desktop daemon for managed CC sessions
+on npm.
 
 > **Status: production hub at [`next.clawborrator.com`](https://next.clawborrator.com).**
 > Local dev uses `ws://localhost:8787`. Both supported.
