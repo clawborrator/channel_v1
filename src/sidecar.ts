@@ -3,7 +3,14 @@
 // Code's hook system) read this file to know which session to
 // attribute their event to and which hub to POST to.
 //
-// Path: <cwd>/.claude/clawborrator.session.json. Mode 0600 on POSIX.
+// Path: <cwd>/.claude/clawborrator/runtime.json. Mode 0600 on POSIX.
+//
+// Forward-only rename in 0.0.33: previously at
+// `<cwd>/.claude/clawborrator.session.json` (a flat file that looked
+// like a typo of identity.json). Now under the same `clawborrator/`
+// subdir as identity.json with a purpose-named filename. The daemon's
+// clean_stale + destroy paths nuke the legacy flat-file location as
+// well, so existing sessions don't leak cruft on restart.
 //
 // Storing the channel-token plaintext here matters: hooks need it to
 // authenticate to /api/channel/event. The risk surface is the same
@@ -25,11 +32,15 @@ export interface SidecarPayload {
 }
 
 function sidecarPath(cwd: string): string {
-  return resolve(cwd, '.claude', 'clawborrator.session.json');
+  return resolve(cwd, '.claude', 'clawborrator', 'runtime.json');
 }
 
 export function writeSidecar(payload: SidecarPayload): void {
-  const dir = resolve(payload.cwd, '.claude');
+  // Mkdir the clawborrator/ subdir (used to be just .claude/, but
+  // runtime.json now lives alongside identity.json under
+  // clawborrator/). The daemon's write_persisted_session creates this
+  // dir at preflight too — both calls are idempotent with recursive.
+  const dir = resolve(payload.cwd, '.claude', 'clawborrator');
   try {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
     const file = sidecarPath(payload.cwd);

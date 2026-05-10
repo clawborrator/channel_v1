@@ -51,7 +51,7 @@ channel.stderr.on('data', (d) => process.stderr.write('[channel] ' + d.toString(
 
 // Wait for sidecar
 await new Promise((r) => setTimeout(r, 2000));
-const sidecarPath = resolve(dir, '.claude', 'clawborrator.session.json');
+const sidecarPath = resolve(dir, '.claude', 'clawborrator', 'runtime.json');
 const sidecar = JSON.parse(await import('node:fs').then((m) => m.readFileSync(sidecarPath, 'utf8')));
 const SID = sidecar.sessionId;
 console.error(`[test] sessionId = ${SID}`);

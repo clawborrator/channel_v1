@@ -30,7 +30,7 @@ var log = {
 
 // src/sidecar.ts
 function sidecarPath(cwd) {
-  return resolve(cwd, ".claude", "clawborrator.session.json");
+  return resolve(cwd, ".claude", "clawborrator", "runtime.json");
 }
 function readSidecar(cwd) {
   try {

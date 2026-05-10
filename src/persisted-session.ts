@@ -1,11 +1,19 @@
-// Persist the hub-issued session UUID across MCP process restarts so a
-// fresh `claude` boot in the same project rebinds to the existing
+// Persist the hub-issued session identity across MCP process restarts
+// so a fresh `claude` boot in the same project rebinds to the existing
 // session row instead of minting a sibling row with the same routing
 // name. This is what eliminates the "@driver appears 5 times in
 // list_peers / session ls" duplicate-row class of bug.
 //
+// Forward-only rename in 0.0.33: this file used to live at
+// `<cwd>/.claude/clawborrator/session.json` (and a separate hook
+// runtime sidecar lived at `<cwd>/.claude/clawborrator.session.json`).
+// Both have been moved into the `clawborrator/` subdir and given
+// purpose-named filenames so they no longer look like typos of each
+// other. The daemon's clean_stale + destroy paths nuke the legacy
+// names as well, so existing sessions don't leak cruft when restarted.
+//
 // Storage shape:
-//   <cwd>/.claude/clawborrator/session.json
+//   <cwd>/.claude/clawborrator/identity.json
 //   {
 //     "sessionId":  "<uuid>",
 //     "routingName": "@<slug>",
@@ -14,7 +22,7 @@
 //   }
 //
 // Plus a sibling `.gitignore` ("*\n") inside the same directory so the
-// session file (which contains nothing secret, but is per-machine
+// identity file (which contains nothing secret, but is per-machine
 // runtime state) never leaks into commits.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
@@ -22,7 +30,7 @@ import { resolve } from 'node:path';
 import { log } from './log.js';
 
 const REL_DIR  = '.claude/clawborrator';
-const REL_FILE = '.claude/clawborrator/session.json';
+const REL_FILE = '.claude/clawborrator/identity.json';
 const REL_GI   = '.claude/clawborrator/.gitignore';
 
 interface PersistedSession {
@@ -59,7 +67,7 @@ export function loadPersistedSessionId(cwd: string): string | null {
 }
 
 /**
- * Write the session.json after a successful welcome. Also drops a
+ * Write identity.json after a successful welcome. Also drops a
  * sibling .gitignore on first creation so the dir as a whole stays
  * out of source control.
  */
@@ -86,8 +94,8 @@ export function savePersistedSession(
 }
 
 /**
- * Delete the persisted session.json. Currently unused — kept for
- * symmetry / future operator-driven `claw session reset` flows.
+ * Delete identity.json. Currently unused — kept for symmetry / future
+ * operator-driven `claw session reset` flows.
  */
 export function deletePersistedSession(cwd: string): void {
   const path = resolve(cwd, REL_FILE);

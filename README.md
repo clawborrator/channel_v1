@@ -60,7 +60,7 @@ ends up in the spawned project automatically.
 1. Reads env config; loads channel token.
 2. Opens WSS to `<HUB_URL>/channel` with `Authorization: Bearer <CHANNEL_TOKEN>`.
 3. Sends `register` with host / cwd / pid / version; receives `welcome` with sessionId + routingName.
-4. Writes `<cwd>/.claude/clawborrator.session.json` (mode 0600) so per-event hook spawns can find the active session.
+4. Writes `<cwd>/.claude/clawborrator/runtime.json` (mode 0600) so per-event hook spawns can find the active session.
 5. Maintains the WS with heartbeat ping/pong; reconnects with exponential backoff (1s/2s/5s/15s/30s/60s).
 6. Listens for hub-side messages: `prompt` (cross-session route), `permission_response`, `peers_update`, `bye`, `error`.
 7. Dispatches MCP tool calls (see below) over the same WS.
@@ -68,7 +68,7 @@ ends up in the spawned project automatically.
 
 **Short-lived hook path** (`--hook=<HookName>` flag):
 1. Reads JSON payload from stdin (Claude Code's hook protocol).
-2. Locates the active sidecar (walks up from cwd looking for `.claude/clawborrator.session.json`).
+2. Locates the active sidecar at `.claude/clawborrator/runtime.json`.
 3. Maps the hook name to a clawborrator event (e.g. `PreToolUse` → `tail/PreToolUse`, `UserPromptSubmit` → `chat/prompt`).
 4. POSTs to `<HUB_URL>/api/channel/event` with the channel token from the sidecar.
 5. Echoes stdin to stdout so Claude's hook chain stays intact.
