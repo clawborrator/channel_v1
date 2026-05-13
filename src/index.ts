@@ -26,6 +26,7 @@ import { runHook } from './hook.js';
 import { writeSidecar, deleteSidecar } from './sidecar.js';
 import { TOOL_DEFINITIONS, callTool } from './tools/index.js';
 import { installHooks } from './install-hooks.js';
+import { installPermissions } from './install-permissions.js';
 import { loadPersistedSessionId, savePersistedSession } from './persisted-session.js';
 import { packageVersion } from './version.js';
 
@@ -101,6 +102,22 @@ async function main() {
     // Don't fail boot — operator can still drive Claude; just log so
     // they see hooks aren't capturing.
     log.warn('install-hooks failed', { error: e?.message ?? String(e) });
+  }
+
+  // Allowlist clawborrator MCP tools so the operator isn't prompted
+  // on every reply / route_to_peer / dispatch_to_agent call.
+  // Add-only: if the operator manually removes the pattern, the next
+  // boot re-adds it. Removal-respect would need a sidecar metadata
+  // key — deferred until someone actually wants that.
+  try {
+    const r = installPermissions(cwd);
+    if (r.settingsWritten) {
+      log.info('permissions installed', { added: r.added, alreadyOk: r.alreadyOk });
+    } else {
+      log.debug('permissions already up-to-date', { added: r.added, alreadyOk: r.alreadyOk });
+    }
+  } catch (e: any) {
+    log.warn('install-permissions failed', { error: e?.message ?? String(e) });
   }
 
   // Layer the session-id source: explicit env var > on-disk persisted
