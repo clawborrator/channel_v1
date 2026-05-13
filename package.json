@@ -1,6 +1,6 @@
 {
   "name": "clawborrator-mcp",
-  "version": "0.0.34",
+  "version": "0.0.35",
   "type": "module",
   "description": "clawborrator channel for hub_v1 — MCP server that connects Claude Code to a hub over WebSocket, with hooks for activity capture and tools for cross-session routing.",
   "license": "MIT",

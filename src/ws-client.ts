@@ -22,7 +22,7 @@ import type { ChannelConfig } from './config.js';
 // hub_v1 workspace; keeping the types inlined here is the smaller
 // price than carrying a peer dep.
 type Outbound =
-  | { type: 'register'; host: string; cwd: string; osUser: string | null; pid: number; channelVersion: string; sessionId: string | null }
+  | { type: 'register'; host: string; cwd: string; osUser: string | null; pid: number; channelVersion: string; sessionId: string | null; deleteOnDisconnect?: boolean }
   | { type: 'chat_event'; eventType: 'prompt' | 'reply' | 'reply_chunk'; payload: Record<string, unknown>; ts: string }
   | { type: 'tail_event'; eventType: string; payload: Record<string, unknown>; ts: string }
   | { type: 'permission_request'; requestId: string; tool: string; inputPreview: string; ts: string }
@@ -216,6 +216,10 @@ export class ChannelClient {
       pid: process.pid,
       channelVersion: packageVersion(),
       sessionId: this.currentSessionId,  // null on fresh, populated on rebind
+      // Only set when CLAWBORRATOR_EPHEMERAL=1. Older hubs that don't
+      // know this field just ignore it (extra JSON properties are
+      // discarded by normalizeRegisterFields).
+      ...(this.config.ephemeral ? { deleteOnDisconnect: true } : {}),
     };
     this.send(reg);
   }

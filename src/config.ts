@@ -5,6 +5,13 @@ export interface ChannelConfig {
   hubUrl: string;             // ws:// or wss://, no trailing slash
   token: string;              // ck_live_…
   reuseSessionId: string | null;
+  // When true, the register frame carries deleteOnDisconnect:true so
+  // the hub fully removes this session row when the WS closes
+  // (instead of just flipping it offline). Wired through
+  // CLAWBORRATOR_EPHEMERAL=1 in the env. spawn-worker.sh sets this
+  // automatically for every spawned child; persistent workers leave
+  // it unset.
+  ephemeral: boolean;
 }
 
 export function loadConfig(): ChannelConfig {
@@ -19,8 +26,9 @@ export function loadConfig(): ChannelConfig {
     throw new Error(`CLAWBORRATOR_TOKEN must start with ck_live_`);
   }
   return {
-    hubUrl: hubUrl.replace(/\/$/, ''),
+    hubUrl:         hubUrl.replace(/\/$/, ''),
     token,
     reuseSessionId: process.env.CLAWBORRATOR_REUSE_SESSION_ID?.trim() || null,
+    ephemeral:      process.env.CLAWBORRATOR_EPHEMERAL?.trim() === '1',
   };
 }
