@@ -163,14 +163,14 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'download_to_path',
-    description: 'Download a hub-stored file by fileId to a relative path under your cwd. Use this for BINARY files (PDFs, images, archives, video, etc.) that `read_file` can\'t return inline, or whenever you need the bytes on local disk for processing (e.g. running `Bash pdftoppm`, `Read` on an image, `unzip`). The parent directory is created if missing; the target must NOT already exist (remove it first if you need to refetch). Returns the relative path so you can immediately use Read or Bash on the file. Same ACL as read_file: row must live in this agent\'s session (i.e. the file was forward-cloned here by the hub, or you uploaded it here yourself).',
+    description: 'Download a hub-stored file by fileId to a local path. Use this for BINARY files (PDFs, images, archives, video, etc.) that `read_file` can\'t return inline, or whenever you need the bytes on local disk for processing (e.g. running `Bash pdftoppm`, `Read` on an image, `unzip`). The parent directory is created if missing; the target must NOT already exist (remove it first if you need to refetch). **Returns the ABSOLUTE path the file was written to — always use that exact path verbatim in your follow-up Read/Bash, do not reconstruct it from the `path` you passed.** (The `path` arg is resolved against the MCP subprocess\'s working directory, which is not guaranteed to match claude\'s own cwd; the returned absolute path is the source of truth.) Same ACL as read_file: row must live in this agent\'s session (i.e. the file was forward-cloned here by the hub, or you uploaded it here yourself).',
     inputSchema: {
       type:        'object',
       additionalProperties: false,
       required:    ['fileId', 'path'],
       properties: {
         fileId: { type: 'integer', minimum: 1, description: 'The fileId to download (typically from a routed prompt mentioning fileId=N).' },
-        path:   { type: 'string',  description: 'Relative path under cwd, e.g. "tmp/doc.pdf". Parent dirs are auto-created. Target must not already exist.' },
+        path:   { type: 'string',  description: 'Relative path for the download, e.g. "tmp/doc.pdf". Parent dirs are auto-created. Target must not already exist. NOTE: resolved against the MCP process cwd — read the absolute path back from the tool result rather than assuming where it landed.' },
       },
     },
   },
@@ -538,8 +538,17 @@ async function callDownloadToPath(ctx: CallContext, args: Record<string, unknown
   try { await writeFile(absInput, buf); }
   catch (e: any) { return errorContent(`failed to write to ${rel}: ${e?.message ?? e}`); }
 
+  // Report the ABSOLUTE path, not the cwd-relative form. The `path`
+  // argument is resolved against the MCP subprocess's process.cwd()
+  // — which is NOT guaranteed to match the cwd claude itself is
+  // using (claude code can spawn MCP servers from a different dir).
+  // When they diverge, a relative path in this success string sends
+  // the agent's follow-up Read/Bash looking in the wrong place: the
+  // write succeeded, but "relative to your cwd" was a lie. Handing
+  // back the absolute path makes the result usable no matter where
+  // the MCP's cwd happens to be.
   return textContent(
-    `downloaded fileId=${fileId} (${filename}, ${mime}, ${size} bytes) to ${rel}`,
+    `downloaded fileId=${fileId} (${filename}, ${mime}, ${size} bytes) to ${absInput}`,
   );
 }
 
