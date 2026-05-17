@@ -24,7 +24,7 @@ import type { ChannelConfig } from './config.js';
 type Outbound =
   | { type: 'register'; host: string; cwd: string; osUser: string | null; pid: number; channelVersion: string; sessionId: string | null; deleteOnDisconnect?: boolean; routingName?: string }
   | { type: 'chat_event'; eventType: 'prompt' | 'reply' | 'reply_chunk'; payload: Record<string, unknown>; ts: string }
-  | { type: 'tail_event'; eventType: string; payload: Record<string, unknown>; ts: string }
+  | { type: 'tail_event'; eventType: 'PreToolUse' | 'PostToolUse' | 'Stop' | 'Notification' | 'UserPromptSubmit' | 'AskUserQuestion' | 'Handoff'; payload: Record<string, unknown>; ts: string }
   | { type: 'permission_request'; requestId: string; tool: string; inputPreview: string; ts: string }
   | { type: 'route_request'; correlationId: string; peer: string; prompt: string; mode: 'ask' | 'tell' }
   | { type: 'probe_request'; correlationId: string; peers: string[] | null; prompt: string }

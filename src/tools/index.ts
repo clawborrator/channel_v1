@@ -227,6 +227,28 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    name: 'submit_handoff',
+    description: 'Submit a structured handoff to an orchestrator or other recipient peer. Use this when finishing a delegated task (worker -> orchestrator, validator -> orchestrator, etc.) instead of free-form route_to_peer text. The hub persists the full structured payload as a Handoff tail event for audit AND routes a serialized JSON version to the recipient peer so their CC sees it as a turn input. Pairs with the missions-orchestrator pattern: orchestrator spawns ephemeral worker, worker implements feature, worker calls submit_handoff with status + completed[] + issues[] etc., orchestrator parses the JSON and decides next step. Returns the JSON string the recipient will see so you can confirm shape.',
+    inputSchema: {
+      type:        'object',
+      additionalProperties: false,
+      required:    ['toPeer', 'missionId', 'fromRole', 'featureId', 'status'],
+      properties: {
+        toPeer:    { type: 'string', description: 'Recipient peer routing name (e.g. "@orchestrator-passwordreset"). The recipient receives a serialized JSON string as their turn input.' },
+        missionId: { type: 'string', description: 'Free-form mission correlation id. Pass the same value the orchestrator gave you when it spawned you.' },
+        fromRole:  { type: 'string', enum: ['worker', 'validator', 'orchestrator'], description: 'Which role you played while doing the work.' },
+        featureId: { type: 'string', description: 'Which feature this handoff covers (from the orchestrator\'s features.json).' },
+        status:    { type: 'string', enum: ['completed', 'partial', 'failed'], description: 'completed = every assertion / procedure satisfied. partial = work done but some items skipped (must populate skipped[]). failed = unrecoverable, requires orchestrator intervention.' },
+        completed: { type: 'array', items: { type: 'string' }, description: 'Bullet list of what got implemented / verified / shipped.' },
+        skipped:   { type: 'array', items: { type: 'object', additionalProperties: false, required: ['item', 'reason'], properties: { item: { type: 'string' }, reason: { type: 'string' } } }, description: 'List of {item, reason} for anything deferred.' },
+        commandsRun: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['cmd', 'exitCode'], properties: { cmd: { type: 'string' }, exitCode: { type: 'integer' }, stdoutTail: { type: 'string' } } }, description: 'Each significant shell command you ran, its exit code, optional last ~20 lines of stdout/stderr for diagnostics.' },
+        issues:    { type: 'array', items: { type: 'string' }, description: 'Problems the orchestrator should know about: pre-existing breakages you noticed, ambiguous requirements, security concerns, etc.' },
+        proceduresHonored: { type: 'array', items: { type: 'string' }, description: 'Which of the orchestrator-defined procedures (numbered steps in your prompt) you actually followed.' },
+        notes:     { type: 'string', description: 'Optional free-form prose for context that doesn\'t fit the structured fields.' },
+      },
+    },
+  },
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -701,8 +723,79 @@ export async function callTool(
     case 'download_to_path':  return callDownloadToPath(ctx, args);
     case 'attach_file':       return callAttachFile(ctx, args);
     case 'ask_question':      return callAskQuestion(ctx, args);
+    case 'submit_handoff':    return callSubmitHandoff(ctx, args);
     default:                  return errorContent(`unknown tool: ${name}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// submit_handoff: structured worker/validator -> orchestrator handoff.
+// Dual-shipped: (1) tail_event with eventType=Handoff for the audit log,
+// (2) route_request with the JSON payload serialized as the recipient's
+// turn input so their CC reacts in-flow. Recipient sees a <channel>
+// turn containing the JSON; the orchestrator's CLAUDE.md instructs it
+// to JSON.parse the payload and dispatch on `status`.
+//
+// Fire-and-forget by design: the worker has no reason to block waiting
+// for the orchestrator to react. If a worker is paired with the
+// ephemeral self-terminate hook, submit_handoff completes -> Stop hook
+// fires -> container exits, no orchestrator round-trip in the loop.
+// ---------------------------------------------------------------------------
+async function callSubmitHandoff(ctx: CallContext, args: Record<string, unknown>): Promise<ToolResult> {
+  const toPeer    = String(args.toPeer ?? '').trim();
+  const missionId = String(args.missionId ?? '').trim();
+  const fromRole  = String(args.fromRole ?? '').trim();
+  const featureId = String(args.featureId ?? '').trim();
+  const status    = String(args.status ?? '').trim();
+  if (!toPeer)    return errorContent('toPeer is required');
+  if (!missionId) return errorContent('missionId is required');
+  if (!fromRole)  return errorContent('fromRole is required');
+  if (!featureId) return errorContent('featureId is required');
+  if (!status)    return errorContent('status is required');
+  if (!['worker', 'validator', 'orchestrator'].includes(fromRole)) {
+    return errorContent(`fromRole must be one of worker | validator | orchestrator (got "${fromRole}")`);
+  }
+  if (!['completed', 'partial', 'failed'].includes(status)) {
+    return errorContent(`status must be one of completed | partial | failed (got "${status}")`);
+  }
+
+  const handoff = {
+    missionId,
+    fromRole,
+    featureId,
+    status,
+    completed:         Array.isArray(args.completed) ? args.completed : [],
+    skipped:           Array.isArray(args.skipped) ? args.skipped : [],
+    commandsRun:       Array.isArray(args.commandsRun) ? args.commandsRun : [],
+    issues:            Array.isArray(args.issues) ? args.issues : [],
+    proceduresHonored: Array.isArray(args.proceduresHonored) ? args.proceduresHonored : [],
+    ...(typeof args.notes === 'string' && args.notes ? { notes: args.notes } : {}),
+    submittedAt:       new Date().toISOString(),
+  };
+
+  // (1) Audit-log tail event. Hub persists to events table; orchard-chat
+  //     timeline + any webhook subscriber sees it.
+  ctx.client.send({
+    type:      'tail_event',
+    eventType: 'Handoff',
+    payload:   handoff,
+    ts:        handoff.submittedAt,
+  });
+
+  // (2) Route the serialized handoff as the recipient's turn input.
+  //     mode=tell because the orchestrator's response is its decision
+  //     about what to spawn next, not a reply addressed back here. The
+  //     worker is typically about to self-terminate anyway.
+  const prompt = JSON.stringify(handoff);
+  ctx.client.send({
+    type:          'route_request',
+    correlationId: randomUUID(),
+    peer:          toPeer,
+    prompt,
+    mode:          'tell',
+  });
+
+  return textContent(`handoff submitted to ${toPeer} (mission=${missionId}, feature=${featureId}, status=${status}); recipient will see:\n${prompt}`);
 }
 
 // ---------------------------------------------------------------------------
