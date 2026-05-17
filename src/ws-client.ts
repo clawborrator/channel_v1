@@ -22,7 +22,7 @@ import type { ChannelConfig } from './config.js';
 // hub_v1 workspace; keeping the types inlined here is the smaller
 // price than carrying a peer dep.
 type Outbound =
-  | { type: 'register'; host: string; cwd: string; osUser: string | null; pid: number; channelVersion: string; sessionId: string | null; deleteOnDisconnect?: boolean }
+  | { type: 'register'; host: string; cwd: string; osUser: string | null; pid: number; channelVersion: string; sessionId: string | null; deleteOnDisconnect?: boolean; routingName?: string }
   | { type: 'chat_event'; eventType: 'prompt' | 'reply' | 'reply_chunk'; payload: Record<string, unknown>; ts: string }
   | { type: 'tail_event'; eventType: string; payload: Record<string, unknown>; ts: string }
   | { type: 'permission_request'; requestId: string; tool: string; inputPreview: string; ts: string }
@@ -220,6 +220,16 @@ export class ChannelClient {
       // know this field just ignore it (extra JSON properties are
       // discarded by normalizeRegisterFields).
       ...(this.config.ephemeral ? { deleteOnDisconnect: true } : {}),
+      // Operator-supplied routing name. When set via
+      // CLAWBORRATOR_ROUTING_NAME env, the MCP normalizes (lowercase,
+      // non-alphanumeric→dash, trim dashes, drop leading `@` if
+      // present) and includes it here. The hub honors this as the
+      // candidate routing name instead of deriving from cwd, then
+      // runs the standard same-owner collision check + suffix dance.
+      // Older hubs ignore extra register fields, so a 0.x client
+      // talking to a 0.x hub that doesn't know about this field
+      // silently falls back to cwd-derivation.
+      ...(this.config.routingName ? { routingName: this.config.routingName } : {}),
     };
     this.send(reg);
   }

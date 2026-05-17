@@ -12,6 +12,15 @@ export interface ChannelConfig {
   // automatically for every spawned child; persistent workers leave
   // it unset.
   ephemeral: boolean;
+  // Operator-supplied routing name override. When set via
+  // CLAWBORRATOR_ROUTING_NAME, the MCP includes it in the register
+  // frame and the hub uses it as the candidate routing name instead
+  // of deriving from cwd. Normalized at load time (lowercase, non-
+  // alphanumeric→dash, trim dashes, leading `@` stripped). Null when
+  // unset; the hub falls back to its existing cwd-derivation in that
+  // case. Older hubs that don't know about the field silently
+  // ignore it.
+  routingName: string | null;
 }
 
 export function loadConfig(): ChannelConfig {
@@ -30,5 +39,20 @@ export function loadConfig(): ChannelConfig {
     token,
     reuseSessionId: process.env.CLAWBORRATOR_REUSE_SESSION_ID?.trim() || null,
     ephemeral:      process.env.CLAWBORRATOR_EPHEMERAL?.trim() === '1',
+    routingName:    normalizeRoutingName(process.env.CLAWBORRATOR_ROUTING_NAME),
   };
+}
+
+// Slug-clean the operator-supplied routing name so it matches the
+// hub's existing makeRoutingName output: lowercase, alphanumeric +
+// dash only, no leading/trailing dashes, no leading `@` (the hub
+// adds it). Returns null for unset / empty / fully-stripped inputs
+// so the register frame doesn't carry a meaningless field.
+function normalizeRoutingName(raw: string | undefined | null): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const noAt = trimmed.replace(/^@+/, '');
+  const slug = noAt.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+  return slug || null;
 }
