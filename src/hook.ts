@@ -371,5 +371,30 @@ export async function runHook(hookName: string): Promise<void> {
     ts:        new Date().toISOString(),
   }, 5000);
 
+  // Ephemeral self-terminate: when CLAWBORRATOR_EPHEMERAL=1 and the
+  // first Stop arrives (assistant's initial turn has ended), tell PID 1
+  // to shut down. The container's expect entrypoint propagates SIGTERM
+  // to claude, claude shuts down the MCP, the MCP flushes its WS close
+  // frame, the hub reaps the session row (because EPHEMERAL also flags
+  // delete_on_disconnect on the register), and docker --rm removes the
+  // container. End result: spawn → do work → route_to_peer → die,
+  // with the caller not needing to enforce its own timeout.
+  //
+  // SubagentStop is intentionally excluded. A Task-tool subagent
+  // finishing is NOT the parent's turn ending; the parent fires its own
+  // Stop later. Only the real top-level Stop terminates.
+  //
+  // process.kill(1) targets the entrypoint inside this container, not
+  // anything on the host. The try/catch covers the dev-mode case where
+  // hook is invoked outside a container (PID 1 is init, signal denied).
+  if (hookName === 'Stop' && process.env.CLAWBORRATOR_EPHEMERAL === '1') {
+    log.info('ephemeral: Stop received, signaling PID 1 to terminate container');
+    try {
+      process.kill(1, 'SIGTERM');
+    } catch (e: any) {
+      log.warn('ephemeral terminate kill failed', { error: e?.message ?? String(e) });
+    }
+  }
+
   process.exit(0);
 }

@@ -370,6 +370,14 @@ async function runHook(hookName2) {
     payload,
     ts: (/* @__PURE__ */ new Date()).toISOString()
   }, 5e3);
+  if (hookName2 === "Stop" && process.env.CLAWBORRATOR_EPHEMERAL === "1") {
+    log.info("ephemeral: Stop received, signaling PID 1 to terminate container");
+    try {
+      process.kill(1, "SIGTERM");
+    } catch (e) {
+      log.warn("ephemeral terminate kill failed", { error: e?.message ?? String(e) });
+    }
+  }
   process.exit(0);
 }
 
