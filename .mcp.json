@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "clawborrator": {
+      "command": "npx",
+      "args": ["-y", "clawborrator-mcp"],
+      "env": {
+        "CLAWBORRATOR_HUB_URL": "${CLAWBORRATOR_HUB_URL:-wss://next.clawborrator.com}",
+        "CLAWBORRATOR_TOKEN": "${CLAWBORRATOR_TOKEN}"
+      }
+    }
+  }
+}
