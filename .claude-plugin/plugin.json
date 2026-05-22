@@ -1,7 +1,7 @@
 {
   "name": "clawborrator",
   "description": "MCP server that connects a Claude Code session to a clawborrator hub: multi-operator control, live view, cross-session routing, and activity capture over a WebSocket channel.",
-  "version": "0.0.39",
+  "version": "0.0.40",
   "author": {
     "name": "MRIIOT LLC",
     "url": "https://next.clawborrator.com"

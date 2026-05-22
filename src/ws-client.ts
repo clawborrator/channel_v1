@@ -49,6 +49,15 @@ type Inbound =
 
 const BACKOFF_SCHEDULE = [1_000, 2_000, 5_000, 15_000, 30_000, 60_000];
 
+// The hub pings roughly every 25s. If nothing at all arrives from the
+// hub for this long, the socket is silently dead — a half-open TCP
+// connection after a network blackhole, where the `ws` library never
+// fires 'close' or 'error' (the OS holds the socket for many minutes
+// before surfacing one). Force-close it so the reconnect path runs.
+// This is the "2 pings missed -> drop and reconnect" watchdog the
+// file header describes.
+const LIVENESS_TIMEOUT_MS = 60_000;
+
 export interface ChannelClientHandlers {
   onWelcome?:    (msg: Extract<Inbound, { type: 'welcome' }>) => void;
   onPrompt?:     (msg: Extract<Inbound, { type: 'prompt' }>) => void;
@@ -94,6 +103,7 @@ export class ChannelClient {
   private attempt = 0;
   private stopped = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private livenessTimer: NodeJS.Timeout | null = null;
   private currentSessionId: string | null;
   private pending = new Map<string /* correlationId */, Pending>();
   private promptSubscribers: PromptSubscriber[] = [];
@@ -129,6 +139,7 @@ export class ChannelClient {
   stop(): Promise<void> {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.clearLiveness();
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.resolve();
     return new Promise<void>((resolve) => {
@@ -208,6 +219,7 @@ export class ChannelClient {
   private onOpen(): void {
     log.info('ws open');
     this.attempt = 0;
+    this.armLiveness();
     const reg: Outbound = {
       type: 'register',
       host: hostname(),
@@ -235,6 +247,9 @@ export class ChannelClient {
   }
 
   private onMessage(text: string): void {
+    // Any inbound frame proves the socket is alive — re-arm the
+    // liveness watchdog.
+    this.armLiveness();
     let msg: Inbound;
     try {
       msg = JSON.parse(text);
@@ -355,6 +370,7 @@ export class ChannelClient {
   private onClose(code: number, reason: string): void {
     log.info('ws close', { code, reason });
     this.ws = null;
+    this.clearLiveness();
     if (!this.stopped) this.scheduleReconnect();
   }
 
@@ -368,5 +384,34 @@ export class ChannelClient {
     this.attempt += 1;
     log.info('reconnecting', { delayMs: delay, attempt: this.attempt });
     this.reconnectTimer = setTimeout(() => this.connect(), delay);
+  }
+
+  /** (Re)arm the liveness watchdog. Called on connect and on every
+   *  inbound frame, so any hub traffic keeps it from firing. */
+  private armLiveness(): void {
+    if (this.livenessTimer) clearTimeout(this.livenessTimer);
+    this.livenessTimer = setTimeout(() => this.onLivenessTimeout(), LIVENESS_TIMEOUT_MS);
+  }
+
+  private clearLiveness(): void {
+    if (this.livenessTimer) {
+      clearTimeout(this.livenessTimer);
+      this.livenessTimer = null;
+    }
+  }
+
+  /** No traffic from the hub for LIVENESS_TIMEOUT_MS. A clean
+   *  disconnect would have fired 'close' already, so reaching here
+   *  means the socket is half-open (silent network drop) and the
+   *  `ws` library will never surface it on its own. terminate()
+   *  forces the close, which routes through onClose -> reconnect. */
+  private onLivenessTimeout(): void {
+    this.livenessTimer = null;
+    const ws = this.ws;
+    if (!ws) return;
+    log.warn('no hub traffic; terminating dead channel socket', {
+      timeoutMs: LIVENESS_TIMEOUT_MS,
+    });
+    ws.terminate();
   }
 }
