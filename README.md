@@ -54,6 +54,33 @@ ends up in the spawned project automatically.
 
 ---
 
+## Install as a Claude Code plugin
+
+clawborrator is an official external Claude Code plugin. This repo
+ships `.claude-plugin/plugin.json` and a root `.mcp.json`, so once it
+is listed in a plugin marketplace it installs with:
+
+```
+/plugin install clawborrator@<marketplace>
+```
+
+The bundled `.mcp.json` resolves its config from environment
+variables instead of a committed token, so it carries no secret.
+**You still have to supply the channel token yourself** — a
+committed plugin cannot ship a per-user secret. Before the MCP
+server can connect to the hub, set in your environment:
+
+| Env var | Required | Default |
+|---|---|---|
+| `CLAWBORRATOR_TOKEN` | yes | none. Mint one with `claw token mint --kind=channel`. |
+| `CLAWBORRATOR_HUB_URL` | no | `wss://next.clawborrator.com`. Self-hosters point this at their own hub. |
+
+Without `CLAWBORRATOR_TOKEN` set, the server starts but cannot
+authenticate, and the session never registers with the hub. This is
+the one manual step the plugin install cannot do for you.
+
+---
+
 ## What it does
 
 **Long-lived MCP path** (default invocation):
