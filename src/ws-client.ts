@@ -35,7 +35,7 @@ type Outbound =
 
 type Inbound =
   | { type: 'welcome'; sessionId: string; routingName: string; channelTokenName: string }
-  | { type: 'prompt'; chatId: string; text: string }
+  | { type: 'prompt'; chatId: string; text: string; askerUser?: string; askerGroups?: string[] }
   | { type: 'permission_response'; requestId: string; decision: 'allow' | 'deny' | 'expired'; message: string | null }
   | { type: 'route_response'; correlationId: string; peerLogin: string; reply: string }
   | { type: 'route_reply'; routeId: string; fromName: string; text: string; ts: string; origin?: 'operator' | 'mcp' }

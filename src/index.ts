@@ -154,9 +154,12 @@ async function main() {
         tools: { listChanged: true },
       },
       instructions:
+        `══════════════════════════════════════════════════════════════════\n` +
+        `HARD RULE — every <channel source="${SOURCE_NAME}" ...> message you receive MUST produce at least one call to the "reply" or "reply_chunk" tool before your turn ends, with chat_id set to the value from the inbound tag. NO EXCEPTIONS. NO SILENT SUCCESSES. The remote operator can see ONLY text delivered via those tools — anything you write to your local terminal, any narration, any "I just answered" thought, any tool result you printed, is COMPLETELY INVISIBLE to them. If you skip the reply tool, the operator stares at a "thinking" spinner until it times out at 15 minutes and assumes you crashed. This applies to short answers, long answers, error responses, refusals, clarifying questions, peer-report acks (use the dedicated "no reply required" path below), and acknowledgments. If the answer is "ok done", call reply with "ok done" — do not skip just because the answer is trivial.\n` +
+        `══════════════════════════════════════════════════════════════════\n\n` +
         `Messages from a remote operator arrive as <channel source="${SOURCE_NAME}" chat_id="..."> tags. ` +
         `Treat them as user input from someone working with you remotely. ` +
-        `When you reply, use the "reply" tool for short atomic replies, or "reply_chunk" to stream long output progressively (the operator sees text growing live; close with done:true). Pass back the chat_id from the inbound tag in either case so the response routes correctly. ` +
+        `Use the "reply" tool for short atomic replies, or "reply_chunk" to stream long output progressively (the operator sees text growing live; close with done:true). Pass back the chat_id from the inbound tag in either case so the response routes correctly. ` +
         `Permission prompts may also be relayed for remote approval; the local terminal dialog stays open in parallel. ` +
         `\n\nCross-session routing tools (only usable when this session was published as a composable agent — isolated agents get a refusal):` +
         `\n- list_peers: see the operator's other running Claude Code sessions by routingName.` +
@@ -220,14 +223,22 @@ async function main() {
       // claude/channel handler wraps it in a <channel source="..."
       // chat_id="..." sender="..."> tag and surfaces it as user
       // input. No tool poll required; Claude reacts on receipt.
-      log.info('prompt received', { chatId: m.chatId });
+      //
+      // askerUser / askerGroups (optional, stamped upstream by
+      // trusted callers like bench-app) ride along as XML attributes
+      // so the specialist knows WHO is asking without needing an
+      // out-of-band handshake.
+      log.info('prompt received', { chatId: m.chatId, askerUser: m.askerUser });
+      const meta: Record<string, string> = { chat_id: m.chatId, sender: 'remote' };
+      if (m.askerUser)                                       meta.user   = m.askerUser;
+      if (Array.isArray(m.askerGroups) && m.askerGroups.length > 0) meta.groups = m.askerGroups.join(',');
       server.notification({
         method: 'notifications/claude/channel',
         params: {
           content: m.text,
           // meta values must be strings + identifier-safe (used as XML
           // attributes on the <channel ...> tag CC builds).
-          meta: { chat_id: m.chatId, sender: 'remote' },
+          meta,
         },
       }).catch((e) => log.warn('channel notification failed', { error: String(e) }));
     },
