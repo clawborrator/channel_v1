@@ -44,6 +44,10 @@ import type { ChannelClient } from '../ws-client.js';
 const ASK_TIMEOUT_MS   = 900_000;
 const PROBE_TIMEOUT_MS = 30_000;
 const LIST_TIMEOUT_MS  = 5_000;
+// Tell mode: hub responds immediately (delivered / offline / refused).
+// The 5s ceiling is just network-jitter slack — anything beyond that
+// is a real hub problem and the caller should treat as undelivered.
+const TELL_TIMEOUT_MS  = 5_000;
 const ASK_QUESTION_TIMEOUT_MS = 900_000;  // 15min — same cap as route ask mode
 const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
 const MAX_READ_INLINE_BYTES = 1 * 1024 * 1024;
@@ -316,8 +320,30 @@ async function callRouteToPeer(ctx: CallContext, args: Record<string, unknown>):
   if (!prompt) return errorContent('prompt is required');
   const correlationId = randomUUID();
   if (mode === 'tell') {
-    ctx.client.send({ type: 'route_request', correlationId, peer, prompt, mode });
-    return textContent(`routed to ${peer} (tell mode — fire-and-forget)`);
+    // Tell mode awaits the hub's delivery acknowledgement (short
+    // timeout — hub responds immediately whether the route succeeded,
+    // the target was offline, or it was refused for any other reason).
+    // We don't wait for the target to process — that's still
+    // fire-and-forget — but we DO confirm the route_request was
+    // accepted + the target's session was reachable at delivery time.
+    // Pre-0.0.43 this method returned success without any check,
+    // silently dropping pushes when the target's WS was momentarily
+    // dead. See agentsasinfra router/monitor pipeline for the bug
+    // that motivated this fix.
+    try {
+      const result = await ctx.client.requestSingle<{ peerLogin: string; reply: string }>(
+        { type: 'route_request', correlationId, peer, prompt, mode },
+        TELL_TIMEOUT_MS,
+      );
+      // Hub returns reply='(tell mode — no reply)' on success, or a
+      // string starting with 'error:' for offline / refused / etc.
+      if (typeof result.reply === 'string' && result.reply.startsWith('error:')) {
+        return errorContent(`route_to_peer tell rejected: ${result.reply}`);
+      }
+      return textContent(`routed to @${result.peerLogin || peer.replace(/^@/, '')} (tell mode — delivered)`);
+    } catch (e: any) {
+      return errorContent(`route_to_peer tell did not confirm: ${e?.message ?? String(e)}`);
+    }
   }
   try {
     const result = await ctx.client.requestSingle<{ peerLogin: string; reply: string }>(
