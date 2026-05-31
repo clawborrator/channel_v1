@@ -192,6 +192,30 @@ function reconcileHookEvent(
  * tail.mjs for the project at `cwd`. Returns a summary describing what
  * changed; useful for boot-time logging.
  */
+// Sweep our (#clawborrator-hook) entries out of event names no longer in
+// HOOK_NAMES (e.g. SessionStart / SessionEnd, now emitted server-side
+// from the /channel WS lifecycle) — this is what makes earlier installs
+// converge after an upgrade. Leaves entries that aren't ours untouched
+// (the operator may keep their own hooks there) and drops now-empty
+// matcher rows. Mutates `hooks` in place; returns how many were removed.
+function sweepStaleHookEntries(hooks: Record<string, ClaudeHook[]>): number {
+  let removed = 0;
+  const desiredSet = new Set<string>(HOOK_NAMES);
+  for (const eventName of Object.keys(hooks)) {
+    if (desiredSet.has(eventName)) continue;
+    const entries = hooks[eventName];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const before = entry.hooks.length;
+      entry.hooks = entry.hooks.filter((h) => !isOurHook(h));
+      if (entry.hooks.length < before) removed += before - entry.hooks.length;
+    }
+    hooks[eventName] = entries.filter((e) => e.hooks.length > 0);
+    if (hooks[eventName].length === 0) delete hooks[eventName];
+  }
+  return removed;
+}
+
 export function installHooks(cwd: string): {
   hookFileWritten: boolean;
   settingsWritten: boolean;
@@ -236,27 +260,9 @@ export function installHooks(cwd: string): {
     else alreadyOk++;
   }
 
-  // Sweep our (#clawborrator-hook) entries from event names that are
-  // NO LONGER in HOOK_NAMES — currently SessionStart / SessionEnd,
-  // which we now emit server-side from /channel WS lifecycle. This
-  // is what makes earlier installs converge after an upgrade.
-  // Don't touch entries that aren't ours (the operator may have
-  // their own hooks in those slots).
-  let removed = 0;
-  const desiredSet = new Set<string>(HOOK_NAMES);
-  for (const eventName of Object.keys(s.hooks)) {
-    if (desiredSet.has(eventName)) continue;
-    const entries = s.hooks[eventName];
-    if (!Array.isArray(entries)) continue;
-    for (const entry of entries) {
-      const before = entry.hooks.length;
-      entry.hooks = entry.hooks.filter((h) => !isOurHook(h));
-      if (entry.hooks.length < before) removed += before - entry.hooks.length;
-    }
-    // Drop now-empty matcher rows so we don't leave hollow shells.
-    s.hooks[eventName] = entries.filter((e) => e.hooks.length > 0);
-    if (s.hooks[eventName].length === 0) delete s.hooks[eventName];
-  }
+  // Sweep our entries out of event names no longer in HOOK_NAMES so
+  // earlier installs converge after an upgrade (see sweepStaleHookEntries).
+  const removed = sweepStaleHookEntries(s.hooks);
   if (removed > 0) refreshed += removed;
 
   // 3) Write only if the serialized form changed.

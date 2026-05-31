@@ -767,34 +767,56 @@ export async function callTool(
 // ephemeral self-terminate hook, submit_handoff completes -> Stop hook
 // fires -> container exits, no orchestrator round-trip in the loop.
 // ---------------------------------------------------------------------------
-async function callSubmitHandoff(ctx: CallContext, args: Record<string, unknown>): Promise<ToolResult> {
+// Coerce a value to an array, defaulting to [] for non-arrays. The
+// handoff list fields are all optional + best-effort.
+function asArray(v: unknown): unknown[] {
+  return Array.isArray(v) ? v : [];
+}
+
+const HANDOFF_ROLES    = ['worker', 'validator', 'orchestrator'];
+const HANDOFF_STATUSES = ['completed', 'partial', 'failed'];
+
+// Validate the required + enum fields of a submit_handoff call. Returns
+// the trimmed required fields, or an error message on the first failed
+// gate. Extracted so the guard chain is isolated from the send/route
+// side effects.
+function validateHandoffArgs(args: Record<string, unknown>):
+  | { ok: true; toPeer: string; missionId: string; fromRole: string; featureId: string; status: string }
+  | { ok: false; message: string } {
   const toPeer    = String(args.toPeer ?? '').trim();
   const missionId = String(args.missionId ?? '').trim();
   const fromRole  = String(args.fromRole ?? '').trim();
   const featureId = String(args.featureId ?? '').trim();
   const status    = String(args.status ?? '').trim();
-  if (!toPeer)    return errorContent('toPeer is required');
-  if (!missionId) return errorContent('missionId is required');
-  if (!fromRole)  return errorContent('fromRole is required');
-  if (!featureId) return errorContent('featureId is required');
-  if (!status)    return errorContent('status is required');
-  if (!['worker', 'validator', 'orchestrator'].includes(fromRole)) {
-    return errorContent(`fromRole must be one of worker | validator | orchestrator (got "${fromRole}")`);
+  if (!toPeer)    return { ok: false, message: 'toPeer is required' };
+  if (!missionId) return { ok: false, message: 'missionId is required' };
+  if (!fromRole)  return { ok: false, message: 'fromRole is required' };
+  if (!featureId) return { ok: false, message: 'featureId is required' };
+  if (!status)    return { ok: false, message: 'status is required' };
+  if (!HANDOFF_ROLES.includes(fromRole)) {
+    return { ok: false, message: `fromRole must be one of worker | validator | orchestrator (got "${fromRole}")` };
   }
-  if (!['completed', 'partial', 'failed'].includes(status)) {
-    return errorContent(`status must be one of completed | partial | failed (got "${status}")`);
+  if (!HANDOFF_STATUSES.includes(status)) {
+    return { ok: false, message: `status must be one of completed | partial | failed (got "${status}")` };
   }
+  return { ok: true, toPeer, missionId, fromRole, featureId, status };
+}
+
+async function callSubmitHandoff(ctx: CallContext, args: Record<string, unknown>): Promise<ToolResult> {
+  const v = validateHandoffArgs(args);
+  if (!v.ok) return errorContent(v.message);
+  const { toPeer, missionId, fromRole, featureId, status } = v;
 
   const handoff = {
     missionId,
     fromRole,
     featureId,
     status,
-    completed:         Array.isArray(args.completed) ? args.completed : [],
-    skipped:           Array.isArray(args.skipped) ? args.skipped : [],
-    commandsRun:       Array.isArray(args.commandsRun) ? args.commandsRun : [],
-    issues:            Array.isArray(args.issues) ? args.issues : [],
-    proceduresHonored: Array.isArray(args.proceduresHonored) ? args.proceduresHonored : [],
+    completed:         asArray(args.completed),
+    skipped:           asArray(args.skipped),
+    commandsRun:       asArray(args.commandsRun),
+    issues:            asArray(args.issues),
+    proceduresHonored: asArray(args.proceduresHonored),
     ...(typeof args.notes === 'string' && args.notes ? { notes: args.notes } : {}),
     submittedAt:       new Date().toISOString(),
   };
