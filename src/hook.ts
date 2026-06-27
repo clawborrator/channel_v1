@@ -42,6 +42,7 @@ import {
   hasThinkingBlocksBeforeToolUse,
   extractFromLastAssistantMessage,
   extractFinalAnswerFromTranscript,
+  extractTurnUsage,
   DEFAULT_TAIL_BYTES,
 } from './transcript.js';
 
@@ -309,6 +310,50 @@ async function runStop(sidecar: SidecarPayload, payload: Record<string, unknown>
   }, 2000);
 }
 
+// Stop: attach per-turn token usage to the payload so it rides the
+// always-fired tail/Stop event (the main POST in runHook). We use the
+// tail/Stop event — not the conditional chat/reply — deliberately:
+// turns whose final answer goes out via mcp__clawborrator__reply
+// produce NO chat/reply event, and those (the remote-operator turns)
+// are exactly the ones worth accounting. Runs AFTER runStop so the
+// 500ms transcript-flush wait inside enrichStopAssistantText has
+// already landed the final assistant record on disk; a short retry
+// covers the case where runStop returned via last_assistant_message
+// without reading the transcript at all.
+async function enrichStopTokenUsage(payload: Record<string, unknown>): Promise<void> {
+  const transcriptPath = typeof payload.transcript_path === 'string' ? payload.transcript_path : '';
+  if (!transcriptPath) return;
+
+  let usage = extractTurnUsage(transcriptPath);
+  let tries = 0;
+  while (!usage && tries < 3) {
+    await new Promise((r) => setTimeout(r, 120));
+    usage = extractTurnUsage(transcriptPath);
+    tries++;
+  }
+  if (!usage) {
+    log.debug('stop: no turn usage found in transcript tail');
+    return;
+  }
+  // CC's Stop hook payload carries `session_id` — the CC --session-id of
+  // this incarnation, the SAME id the desktop_v1 sampler tags cumulative
+  // rows with. Carrying it lets the hub join turn deltas to cumulative
+  // snapshots per (session, cc_session_id, model). Distinct from the
+  // clawborrator hub sessionId on the sidecar.
+  const ccSessionId = typeof payload.session_id === 'string' ? payload.session_id : '';
+  payload.token_usage = { ...usage, cc_session_id: ccSessionId };
+  log.info('stop: turn token usage attached', {
+    grain:        usage.grain,
+    model:        usage.model,
+    ccSessionId,
+    turnMessages: usage.turn_messages,
+    input:        usage.usage.input_tokens,
+    output:       usage.usage.output_tokens,
+    cacheRead:    usage.usage.cache_read_input_tokens,
+    cacheCreate:  usage.usage.cache_creation_input_tokens,
+  });
+}
+
 // Per-hook pre-enrichment dispatch. Mutates payload in place where
 // the variant needs to (Stop's assistant_text path) and may emit
 // chat-lane events. SubagentStop intentionally does NOTHING here —
@@ -323,6 +368,8 @@ async function dispatchHookEnrichment(
     // attached operators see Claude's response in the chat lane.
     // The tail Stop event below marks the boundary.
     await runStop(sidecar, payload);
+    // Attach per-turn token usage to payload → rides the tail/Stop POST.
+    await enrichStopTokenUsage(payload);
     return;
   }
   if (hookName === 'SubagentStop') {

@@ -47,6 +47,7 @@ function findSidecar(start) {
 // src/transcript.ts
 import { openSync, readSync, closeSync, statSync } from "node:fs";
 var DEFAULT_TAIL_BYTES = 256 * 1024;
+var USAGE_TAIL_BYTES = 1024 * 1024;
 function readTranscriptMessages(path, tailBytes = DEFAULT_TAIL_BYTES) {
   try {
     const stat = statSync(path);
@@ -157,6 +158,59 @@ function extractFinalAnswerFromTranscript(path, tailBytes = DEFAULT_TAIL_BYTES) 
     if (joined) return joined;
   }
   return "";
+}
+function num(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+function isTurnBoundaryUserMessage(m) {
+  if (m?.type !== "user") return false;
+  const content = m.message?.content;
+  if (typeof content === "string") return content.trim().length > 0;
+  if (Array.isArray(content)) {
+    const hasToolResult = content.some((c) => c?.type === "tool_result");
+    return !hasToolResult;
+  }
+  return true;
+}
+function readUsageBlock(m) {
+  const u = m.message?.usage;
+  return u && typeof u === "object" ? u : null;
+}
+function extractTurnUsageFromMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, count = 0;
+  let model = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (isTurnBoundaryUserMessage(m)) break;
+    if (m?.type !== "assistant") continue;
+    const u = readUsageBlock(m);
+    if (!u) continue;
+    input += num(u.input_tokens);
+    output += num(u.output_tokens);
+    cacheCreate += num(u.cache_creation_input_tokens);
+    cacheRead += num(u.cache_read_input_tokens);
+    count++;
+    if (model === null) {
+      const mdl = m.message?.model;
+      if (typeof mdl === "string") model = mdl;
+    }
+  }
+  if (count === 0) return null;
+  return {
+    grain: "turn",
+    model,
+    usage: {
+      input_tokens: input,
+      output_tokens: output,
+      cache_creation_input_tokens: cacheCreate,
+      cache_read_input_tokens: cacheRead
+    },
+    turn_messages: count
+  };
+}
+function extractTurnUsage(path, tailBytes = USAGE_TAIL_BYTES) {
+  return extractTurnUsageFromMessages(readTranscriptMessages(path, tailBytes));
 }
 
 // src/hook.ts
@@ -333,9 +387,37 @@ async function runStop(sidecar, payload) {
     ts: (/* @__PURE__ */ new Date()).toISOString()
   }, 2e3);
 }
+async function enrichStopTokenUsage(payload) {
+  const transcriptPath = typeof payload.transcript_path === "string" ? payload.transcript_path : "";
+  if (!transcriptPath) return;
+  let usage = extractTurnUsage(transcriptPath);
+  let tries = 0;
+  while (!usage && tries < 3) {
+    await new Promise((r) => setTimeout(r, 120));
+    usage = extractTurnUsage(transcriptPath);
+    tries++;
+  }
+  if (!usage) {
+    log.debug("stop: no turn usage found in transcript tail");
+    return;
+  }
+  const ccSessionId = typeof payload.session_id === "string" ? payload.session_id : "";
+  payload.token_usage = { ...usage, cc_session_id: ccSessionId };
+  log.info("stop: turn token usage attached", {
+    grain: usage.grain,
+    model: usage.model,
+    ccSessionId,
+    turnMessages: usage.turn_messages,
+    input: usage.usage.input_tokens,
+    output: usage.usage.output_tokens,
+    cacheRead: usage.usage.cache_read_input_tokens,
+    cacheCreate: usage.usage.cache_creation_input_tokens
+  });
+}
 async function dispatchHookEnrichment(hookName2, sidecar, payload) {
   if (hookName2 === "Stop") {
     await runStop(sidecar, payload);
+    await enrichStopTokenUsage(payload);
     return;
   }
   if (hookName2 === "SubagentStop") {

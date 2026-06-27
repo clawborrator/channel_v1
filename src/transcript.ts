@@ -25,6 +25,13 @@ export interface ContentBlock {
 
 export const DEFAULT_TAIL_BYTES = 256 * 1024;
 
+// Larger window for turn-usage summing: a single tool-heavy turn can
+// push earlier assistant records (each carrying a per-call usage block)
+// out of the 256 KB text window. Undersizing here UNDERCOUNTS a turn's
+// tokens, which is worse for an accounting signal than for text. 1 MB
+// covers all but pathological turns; the read happens once per Stop.
+export const USAGE_TAIL_BYTES = 1024 * 1024;
+
 // Read the trailing portion of a Claude Code transcript JSONL and
 // return parsed messages oldest-first. A partial first line (the tail
 // boundary cuts mid-record) is dropped.
@@ -196,4 +203,105 @@ export function extractFinalAnswerFromTranscript(path: string, tailBytes: number
     if (joined) return joined;
   }
   return '';
+}
+
+// ── Per-turn token usage ────────────────────────────────────────────
+// Each assistant record in the transcript carries a `message.usage`
+// block (the Anthropic API response usage for THAT call) and a
+// `message.model`. One operator turn (user prompt → Stop) spans
+// multiple assistant records when tools are used, with tool_results
+// recorded as intervening `user`-type messages. Per-call usage summed
+// across the turn is exactly the billing semantic — you pay input +
+// cache + output on every call — so summing is correct, not double-
+// counting.
+//
+// `grain: 'turn'` is the discriminator that keeps these DELTA values
+// from being summed together with the CUMULATIVE per-session snapshots
+// the desktop_v1 sampler posts. Consumers must never mix grains.
+
+export interface TurnUsage {
+  grain: 'turn';
+  /** Model of the final assistant record in the turn (null if absent). */
+  model: string | null;
+  usage: {
+    input_tokens:                number;
+    output_tokens:               number;
+    cache_creation_input_tokens: number;
+    cache_read_input_tokens:     number;
+  };
+  /** Count of assistant API calls summed into this turn. */
+  turn_messages: number;
+}
+
+function num(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+// A `user` message ends the turn ONLY when it's a genuine prompt. CC
+// records tool_results as user-type messages mid-turn, so a user
+// message whose content is (only) tool_result blocks is NOT a boundary.
+function isTurnBoundaryUserMessage(m: TranscriptMessage): boolean {
+  if (m?.type !== 'user') return false;
+  const content = (m.message as { content?: unknown } | undefined)?.content;
+  if (typeof content === 'string') return content.trim().length > 0;
+  if (Array.isArray(content)) {
+    const hasToolResult = content.some((c) => (c as ContentBlock)?.type === 'tool_result');
+    // tool_result-only → mid-turn round trip; anything else → real prompt.
+    return !hasToolResult;
+  }
+  // Missing/odd shape: treat as a boundary rather than risk summing
+  // across into a previous turn.
+  return true;
+}
+
+function readUsageBlock(m: TranscriptMessage): Record<string, unknown> | null {
+  const u = (m.message as { usage?: unknown } | undefined)?.usage;
+  return u && typeof u === 'object' ? (u as Record<string, unknown>) : null;
+}
+
+// Sum message.usage across every assistant record in the CURRENT turn
+// (walking from the end back to the last genuine user prompt). Pure —
+// caller supplies the parsed messages and handles read retries.
+// Returns null when no assistant usage is present in the window.
+export function extractTurnUsageFromMessages(messages: TranscriptMessage[]): TurnUsage | null {
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  let input = 0, output = 0, cacheCreate = 0, cacheRead = 0, count = 0;
+  let model: string | null = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (isTurnBoundaryUserMessage(m)) break;
+    if (m?.type !== 'assistant') continue;
+    const u = readUsageBlock(m);
+    if (!u) continue;
+    input       += num(u.input_tokens);
+    output      += num(u.output_tokens);
+    cacheCreate += num(u.cache_creation_input_tokens);
+    cacheRead   += num(u.cache_read_input_tokens);
+    count++;
+    // Walking backward, the first assistant record we hit is the LAST
+    // chronologically — the final answer. Its model represents the turn.
+    if (model === null) {
+      const mdl = (m.message as { model?: unknown } | undefined)?.model;
+      if (typeof mdl === 'string') model = mdl;
+    }
+  }
+  if (count === 0) return null;
+  return {
+    grain: 'turn',
+    model,
+    usage: {
+      input_tokens:                input,
+      output_tokens:               output,
+      cache_creation_input_tokens: cacheCreate,
+      cache_read_input_tokens:     cacheRead,
+    },
+    turn_messages: count,
+  };
+}
+
+// Path-based wrapper. Uses the larger USAGE_TAIL_BYTES window so a
+// tool-heavy turn's earlier assistant records aren't truncated out of
+// the sum.
+export function extractTurnUsage(path: string, tailBytes: number = USAGE_TAIL_BYTES): TurnUsage | null {
+  return extractTurnUsageFromMessages(readTranscriptMessages(path, tailBytes));
 }
