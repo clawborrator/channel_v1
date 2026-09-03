@@ -220,13 +220,14 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'attach_file',
-    description: 'Upload a file from your project as a chat attachment. The path must be inside your current working directory (relative paths are resolved against cwd; symlinks pointing outside are refused). Use this when the operator should be able to download a file you produced. Returns a fileId; mention it in your reply text so the operator can find the chip in the dashboard. Optional `targetSessionId` lets you upload directly into a different session (e.g. when delivering a file to a peer the channel-token owner has prompter+ on). Without it, the upload goes to the channel\'s own session — the common case.',
+    description: 'Upload a file from your project as a chat attachment. The path must be inside your current working directory (relative paths are resolved against cwd; symlinks pointing outside are refused). Use this when the operator should be able to download a file you produced. Returns a fileId; mention it in your reply text so the operator can find the chip in the dashboard. Optional `targetSessionId` lets you upload directly into a different session (e.g. when delivering a file to a peer the channel-token owner has prompter+ on). Without it, the upload goes to the channel\'s own session — the common case. `publish: true` makes the file a standing downloadable for everyone who can reach this agent (apps that front it list published files next to the agent); it never expires and re-publishing the same bytes is idempotent. Publish shared documents only (handbooks, forms, reference PDFs), never something produced for one specific asker.',
     inputSchema: {
       type:        'object',
       additionalProperties: false,
       required:    ['path'],
       properties: {
         path:            { type: 'string', description: 'Path to the file. Relative is resolved against cwd; absolute must still resolve to a path under cwd.' },
+        publish:         { type: 'boolean', description: 'Mark the file as a standing downloadable for everyone who can reach this agent (no expiry, deduped per file content). Only for shared documents. Default false.' },
         targetSessionId: { type: 'string', description: 'Optional UUID of a different session to upload to. The channel-token\'s owning user must have prompter+ role on it (owner or shared-as-prompter/approver). Most callers should omit this and let the upload go to the channel\'s own session.' },
       },
     },
@@ -652,6 +653,7 @@ function buildAttachFormData(
   buf: Buffer,
   ownSessionId: string,
   targetSessionId: string | null,
+  publish: boolean,
 ): FormData {
   const filename = basename(realInput);
   const mime     = guessMime(filename);
@@ -662,6 +664,9 @@ function buildAttachFormData(
   // hub gates this server-side via /api/channel/files's
   // resolveSessionRole + isPrompter check).
   fd.append('sessionId', targetSessionId ?? ownSessionId);
+  // publish=true -> hub marks the row expose=1 with no expiry and
+  // dedupes on (session, sha256); see hub routes/channel.ts.
+  if (publish) fd.append('publish', 'true');
   fd.append('file', new Blob([buf], { type: mime }), filename);
   return fd;
 }
@@ -671,7 +676,7 @@ function buildAttachFormData(
 async function postAttachUpload(
   ctx: CallContext,
   fd: FormData,
-): Promise<{ json: { id: number; filename: string; mime: string; size: number; sha256: string; sessionId: string } } | { error: ToolResult }> {
+): Promise<{ json: { id: number; filename: string; mime: string; size: number; sha256: string; sessionId: string; _reused?: boolean } } | { error: ToolResult }> {
   let res: Response;
   try {
     res = await fetch(`${ctx.httpHubUrl}/api/channel/files`, {
@@ -688,7 +693,7 @@ async function postAttachUpload(
   }
   const json = await res.json() as {
     id: number; filename: string; mime: string; size: number;
-    sha256: string; sessionId: string;
+    sha256: string; sessionId: string; _reused?: boolean;
   };
   return { json };
 }
@@ -698,6 +703,7 @@ async function callAttachFile(ctx: CallContext, args: Record<string, unknown>): 
   const targetSessionId = typeof args.targetSessionId === 'string' && args.targetSessionId.trim()
     ? args.targetSessionId.trim()
     : null;
+  const publish = args.publish === true;
   if (!inputPath)        return errorContent('path is required');
   if (!ctx.sessionId)    return errorContent('channel not registered yet — try again in a moment');
 
@@ -723,12 +729,13 @@ async function callAttachFile(ctx: CallContext, args: Record<string, unknown>): 
   // a Blob just fine for this. Filename comes from the basename of
   // the resolved real path so symlink redirects don't smuggle a
   // weird display name.
-  const fd = buildAttachFormData(realInput, buf, ctx.sessionId, targetSessionId);
+  const fd = buildAttachFormData(realInput, buf, ctx.sessionId, targetSessionId, publish);
   const posted = await postAttachUpload(ctx, fd);
   if ('error' in posted) return posted.error;
   const { json: j } = posted;
+  const tag = publish ? (j._reused ? 'published (already listed, refreshed)' : 'published') : 'attached';
   return textContent(
-    `attached ${j.filename} (${j.size} bytes, ${j.mime}); fileId=${j.id}, sha256=${j.sha256.slice(0, 12)}…`,
+    `${tag} ${j.filename} (${j.size} bytes, ${j.mime}); fileId=${j.id}, sha256=${j.sha256.slice(0, 12)}…`,
   );
 }
 

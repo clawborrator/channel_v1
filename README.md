@@ -131,7 +131,7 @@ File exchange:
 
 | Tool | Purpose |
 |---|---|
-| `attach_file({ path, targetSessionId? })` | Upload a file from disk to the session (or to a peer's session you have a share on). Returns `fileId`. |
+| `attach_file({ path, targetSessionId?, publish? })` | Upload a file from disk to the session (or to a peer's session you have a share on). Returns `fileId`. `publish: true` makes it a standing downloadable for everyone who can reach the agent (no expiry, idempotent per content); shared documents only. |
 | `read_file({ fileId })` | Fetch a session-attached file inline (text-mime; under 1 MB). Reply-clone makes peer-uploaded files visible to the recipient. |
 | `download_to_path({ fileId, path })` | Fetch a larger or binary file to disk. Returns the absolute path written. |
 
